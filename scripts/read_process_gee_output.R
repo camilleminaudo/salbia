@@ -309,30 +309,19 @@ for(d in sort(well_covered)){
   #   geom_point(aes(colour = satellite))+
   #   geom_smooth(method = "loess")+
   #   theme_article()
-  # 
-  # ggplot(data_d, aes(distance, blue))+
-  #   geom_point(aes(colour = satellite))+
-  #   geom_smooth(method = "loess")+
-  #   theme_article()
   
   if(sum(data_d$distance>=lower_point)>3){
     data_d$red_blue <- data_d$red/data_d$blue
+    lower_red_blue <- median(data_d$red_blue[data_d$distance>lower_point], na.rm = T)
+    lower_nir <- median(data_d$nir[data_d$distance>lower_point], na.rm = T)
     
-    # lower <- median(data_d$nir[data_d$distance>lower_point], na.rm = T)
-    lower <- median(data_d$nir[data_d$distance>lower_point], na.rm = T)
+    data_d$dev_from_lower_nir <- data_d$nir - lower_nir
+    data_d$dev_from_lower_red_blue <- data_d$red_blue - lower_red_blue
     
-    data_d$dev_from_lower <- data_d$nir - lower
-    # data_d$red_dev_from_lower <- data_d$red - red_lower
     
-    # ggplot(data_d, aes(distance, dev_from_lower))+
-    #   geom_point(aes(colour = date))+
-    #   geom_smooth(method = "loess")+
-    #   # scale_colour_manual(values=myPalette)+
-    #   # scale_fill_manual(values=myPalette)+
-    #   theme_article()
     
     if(d==as.Date("2024-08-01")){
-      plot_that_day <- ggplot(data_d, aes(distance, dev_from_lower))+
+      plot_that_day <- ggplot(data_d, aes(distance, dev_from_lower_nir))+
         geom_line(aes(colour = date))+
         geom_smooth(method = "loess")+
         theme_article()
@@ -351,12 +340,13 @@ plot_that_day
 
 
 data_d.all$red_blue_flag <- qualityCheck(y = data_d.all$red_blue)
-data_d.all$dev_from_lower_flag <- qualityCheck(y = data_d.all$dev_from_lower)
+data_d.all$dev_from_lower_nir_flag <- qualityCheck(y = data_d.all$dev_from_lower_nir)
+data_d.all$dev_from_lower_red_blue_flag <- qualityCheck(y = data_d.all$dev_from_lower_red_blue)
 
 data_d.all$season <- "wet" # June to October
 data_d.all$season[data_d.all$month<6 | data_d.all$month>9] <- "dry"
 
-p_deviation <- ggplot(data_d.all[data_d.all$dev_from_lower_flag==0,], aes(distance, dev_from_lower))+
+p_deviation_nir <- ggplot(data_d.all[data_d.all$dev_from_lower_nir_flag==0,], aes(distance, dev_from_lower_nir))+
   geom_abline(slope = 0, intercept = 0)+
   geom_vline(xintercept = lower_point)+
   geom_line(aes(group = date, colour = decade), linewidth=0.2, alpha=0.2)+
@@ -365,13 +355,34 @@ p_deviation <- ggplot(data_d.all[data_d.all$dev_from_lower_flag==0,], aes(distan
   scale_fill_viridis_d(option = "C")+
   xlab("distance from upstream [degrees]")+
   ylab("deviation from lower zone")+
-  ggtitle("April to July")+
-  theme_article()#+facet_wrap(as.factor(year)~.)
+  theme_article()+facet_wrap(month~.)+
+  ggtitle("Near Infra Red (NIR)")
   # ylim(c(-1,0.5))+
-p_deviation
+# p_deviation_nir
+
+
+p_deviation_red_blue <- ggplot(data_d.all[data_d.all$dev_from_lower_red_blue_flag==0 & !is.na(data_d.all$dev_from_lower_red_blue),],
+                               aes(distance, dev_from_lower_red_blue))+
+  geom_abline(slope = 0, intercept = 0)+
+  geom_vline(xintercept = lower_point)+
+  geom_line(aes(group = date, colour = decade), linewidth=0.2, alpha=0.2)+
+  geom_smooth(method = "loess", aes(colour = decade, fill = decade))+
+  scale_colour_viridis_d(option = "C", begin = 0.1, end = 0.9, direction = 1)+
+  scale_fill_viridis_d(option = "C")+
+  xlab("distance from upstream [degrees]")+
+  ylab("deviation from lower zone")+
+  theme_article()+facet_wrap(month~.)+
+  ggtitle("Red to Blue ratio")
+# ylim(c(-1,0.5))+
+# p_deviation_red_blue
+
 
 ggsave(filename = "nir_deviation.jpeg",
-       plot = p_deviation, path = plotpath, width = 9, height = 5, dpi = 300, units = 'in')
+       plot = p_deviation_nir, path = plotpath, width = 12, height = 9, dpi = 300, units = 'in')
+
+
+ggsave(filename = "red_blue_deviation.jpeg",
+       plot = p_deviation_red_blue, path = plotpath, width = 12, height = 9, dpi = 300, units = 'in')
 
 
 
