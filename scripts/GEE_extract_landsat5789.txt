@@ -1,0 +1,232 @@
+// ── 1. LOAD RIVER SEGMENTS ─────────────────────────────────────────────
+var riverSegments = ee.FeatureCollection('users/youruser/River_Gambia_riverKM');
+
+Map.centerObject(riverSegments, 10);
+Map.addLayer(riverSegments, {color: '0077be'}, 'River segments');
+
+
+// ── 2. PRE-PROCESSING FUNCTIONS ────────────────────────────────────────
+
+// Landsat Collection 2 Level-2 scale factors:
+// SR bands: multiply by 0.0000275, add -0.2
+// This applies identically to L5, L7, L8, L9
+function applyScaleFactorsL(image) {
+  var opticalBands = image.select('SR_B.*')
+    .multiply(0.0000275)
+    .add(-0.2);
+  return image.addBands(opticalBands, null, true);
+}
+
+// QA_PIXEL band bit flags (identical across L5, L7, L8, L9 Collection 2):
+// Bit 1 = Dilated cloud
+// Bit 2 = Cirrus (L8/L9 only, always 0 for L5/L7)
+// Bit 3 = Cloud
+// Bit 4 = Cloud shadow
+// Bit 5 = Snow
+function maskLandsatQA(image) {
+  var qa = image.select('QA_PIXEL');
+  var dilatedCloud = 1 << 1;
+  var cirrus       = 1 << 2;
+  var cloud        = 1 << 3;
+  var cloudShadow  = 1 << 4;
+  var snow         = 1 << 5;
+  var mask = qa.bitwiseAnd(dilatedCloud).eq(0)
+    .and(qa.bitwiseAnd(cirrus).eq(0))
+    .and(qa.bitwiseAnd(cloud).eq(0))
+    .and(qa.bitwiseAnd(cloudShadow).eq(0))
+    .and(qa.bitwiseAnd(snow).eq(0));
+  return image.updateMask(mask);
+}
+
+// Rename bands to a common set of names across all sensors.
+// L5 TM and L7 ETM+ share the same band layout.
+// L8 OLI and L9 OLI-2 share the same band layout.
+// We drop the thermal bands (ST_B6 / ST_B10) — not needed here.
+function renameL57(img) {
+  return img.select(
+    ['SR_B1','SR_B2','SR_B3','SR_B4','SR_B5','SR_B7'],
+    ['blue',  'green', 'red',  'nir',  'swir1','swir2']
+  );
+}
+
+function renameL89(img) {
+  return img.select(
+    ['SR_B2','SR_B3','SR_B4','SR_B5','SR_B6','SR_B7'],
+    ['blue',  'green', 'red',  'nir',  'swir1','swir2']
+  );
+}
+
+// aNDWI — same expression as S2, adapted to available bands
+// Note: no ultrablue or rededge bands on Landsat TM/ETM+/OLI
+function makeaNDWI(image) {
+  var andwi = image.expression(
+    '((RED + GREEN + BLUE) - (NIR + SWIR1 + SWIR2)) / ' +
+    '((RED + GREEN + BLUE) + (NIR + SWIR1 + SWIR2))',
+    {
+      'BLUE':  image.select('blue'),
+      'RED':   image.select('red'),
+      'NIR':   image.select('nir'),
+      'GREEN': image.select('green'),
+      'SWIR1': image.select('swir1'),
+      'SWIR2': image.select('swir2')
+    }).rename('aNDWI');
+  return image.addBands(andwi);
+}
+
+function makeNDVI(image) {
+  var ndvi = image.normalizedDifference(['nir', 'red']).rename('NDVI');
+  return image.addBands(ndvi);
+}
+
+function selectWater(img) {
+  var waterMask = img.select('aNDWI').gte(0)
+    .and(img.select('NDVI').lt(0.2))
+    .and(img.select('blue').lt(0.2));
+  return img.updateMask(waterMask);
+}
+
+// Full prep chains per sensor group
+function prepL57(img) {
+  img = maskLandsatQA(img);
+  img = applyScaleFactorsL(img);
+  img = renameL57(img);
+  img = makeaNDWI(img);
+  img = makeNDVI(img);
+  img = selectWater(img);
+  return img;
+}
+
+function prepL89(img) {
+  img = maskLandsatQA(img);
+  img = applyScaleFactorsL(img);
+  img = renameL89(img);
+  img = makeaNDWI(img);
+  img = makeNDVI(img);
+  img = selectWater(img);
+  return img;
+}
+
+
+// ── 3. BUILD MERGED COLLECTION ─────────────────────────────────────────
+// All four missions, Collection 2 Level-2 (surface reflectance).
+// L7 is included but note the SLC-off failure from May 2003 onwards
+// introduces scan line gaps — the pixel count per segment will reveal
+// how much data loss affects each observation.
+
+var bands = ['blue','green','red','nir','swir1','swir2','aNDWI','NDVI'];
+
+var L5 = ee.ImageCollection('LANDSAT/LT05/C02/T1_L2')
+  .filterBounds(riverSegments)
+  .map(prepL57)
+  .select(bands)
+  .map(function(img) { return img.set('sensor', 'L5'); });
+
+var L7 = ee.ImageCollection('LANDSAT/LE07/C02/T1_L2')
+  .filterBounds(riverSegments)
+  .map(prepL57)
+  .select(bands)
+  .map(function(img) { return img.set('sensor', 'L7'); });
+
+var L8 = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+  .filterBounds(riverSegments)
+  .map(prepL89)
+  .select(bands)
+  .map(function(img) { return img.set('sensor', 'L8'); });
+
+var L9 = ee.ImageCollection('LANDSAT/LC09/C02/T1_L2')
+  .filterBounds(riverSegments)
+  .map(prepL89)
+  .select(bands)
+  .map(function(img) { return img.set('sensor', 'L9'); });
+
+// Merge all four into a single collection
+var LandsatCol = L5.merge(L7).merge(L8).merge(L9);
+
+print('Total images in merged collection:', LandsatCol.size());
+
+
+// ── 4. COMBINED REDUCER ────────────────────────────────────────────────
+var combinedReducer = ee.Reducer.mean()
+  .combine({reducer2: ee.Reducer.stdDev(), sharedInputs: true})
+  .combine({reducer2: ee.Reducer.median(), sharedInputs: true})
+  .combine({reducer2: ee.Reducer.count(),  sharedInputs: true});
+
+
+// ── 5. ZONAL STATS FUNCTION ────────────────────────────────────────────
+function zonalStatsRiver(ic, fc, params) {
+  var _params = {
+    reducer:        combinedReducer,
+    scale:          30,           // Landsat native resolution
+    crs:            'EPSG:32628',
+    bands:          bands,
+    imgProps:       ['LANDSAT_PRODUCT_ID', 'SPACECRAFT_ID', 'sensor'],
+    imgPropsRename: ['img_id', 'satellite', 'sensor'],
+    datetimeName:   'date',
+    datetimeFormat: 'YYYY-MM-dd',
+    minPixels:      3   // at 30m resolution, 3 pixels = ~2700 m² of clean water
+  };
+
+  if (params) {
+    for (var param in params) {
+      _params[param] = params[param] || _params[param];
+    }
+  }
+
+  var results = ic.map(function(img) {
+
+    img = ee.Image(img.select(_params.bands))
+      .set(_params.datetimeName, img.date().format(_params.datetimeFormat))
+      .set('timestamp', img.get('system:time_start'))
+      .set('sensor',    img.get('sensor'));
+
+    var propsFrom = ee.List(_params.imgProps)
+      .cat(ee.List([_params.datetimeName, 'timestamp']));
+    var propsTo = ee.List(_params.imgPropsRename)
+      .cat(ee.List([_params.datetimeName, 'timestamp']));
+    var imgProps = img.toDictionary(propsFrom).rename(propsFrom, propsTo);
+
+    var fcSub = fc.filterBounds(img.geometry());
+
+    return img.reduceRegions({
+      collection: fcSub,
+      reducer:    _params.reducer,
+      scale:      _params.scale,
+      crs:        _params.crs
+    })
+    .map(function(f) {
+      return f.set(imgProps);
+    })
+    .filter(ee.Filter.gte('blue_count', _params.minPixels));
+
+  }).flatten();
+
+  return results;
+}
+
+
+// ── 6. RUN ─────────────────────────────────────────────────────────────
+var riverStats = zonalStatsRiver(LandsatCol, riverSegments, {});
+print('Sample output (first 10 rows):', riverStats.limit(10));
+
+
+// ── 7. EXPORT ──────────────────────────────────────────────────────────
+Export.table.toDrive({
+  collection:  riverStats,
+  description: 'Landsat_Gambia_river_segments',
+  fileFormat:  'CSV',
+  selectors: [
+    // segment identity
+    'seg_id', 'dist_start_km', 'dist_end_km',
+    // image metadata
+    'date', 'timestamp', 'img_id', 'satellite', 'sensor',
+    // reflectance statistics
+    'blue_mean',   'blue_stdDev',   'blue_median',   'blue_count',
+    'green_mean',  'green_stdDev',  'green_median',  'green_count',
+    'red_mean',    'red_stdDev',    'red_median',    'red_count',
+    'nir_mean',    'nir_stdDev',    'nir_median',    'nir_count',
+    'swir1_mean',  'swir1_stdDev',  'swir1_median',  'swir1_count',
+    'swir2_mean',  'swir2_stdDev',  'swir2_median',  'swir2_count',
+    'aNDWI_mean',  'aNDWI_stdDev',  'aNDWI_median',  'aNDWI_count',
+    'NDVI_mean',   'NDVI_stdDev',   'NDVI_median',   'NDVI_count'
+  ]
+});

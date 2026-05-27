@@ -1,0 +1,201 @@
+// ── 1. LOAD RIVER SEGMENTS ─────────────────────────────────────────────
+var riverSegments = ee.FeatureCollection('users/youruser/River_Gambia_riverKM');
+
+Map.centerObject(riverSegments, 10);
+Map.addLayer(riverSegments, {color: '0077be'}, 'River segments');
+
+
+// ── 2. PRE-PROCESSING FUNCTIONS ────────────────────────────────────────
+
+function maskS2clouds(image) {
+  var qa = image.select('QA60');
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+      .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+  return image.updateMask(mask);
+}
+
+// Cloud shadows: SCL band (Scene Classification Layer) in S2_SR_HARMONIZED
+// Class 3 = cloud shadow, 8 = medium cloud, 9 = high cloud, 10 = cirrus
+function maskSCL(image) {
+  var scl = image.select('SCL');
+  var mask = scl.neq(3)   // cloud shadow
+    .and(scl.neq(8))      // medium probability cloud
+    .and(scl.neq(9))      // high probability cloud
+    .and(scl.neq(10));    // cirrus
+  return image.updateMask(mask);
+}
+
+function applyScaleFactors(image) {
+  var opticalBands = image.select('B.*').multiply(0.0001);
+  return image.addBands(opticalBands, null, true);
+}
+
+function renameS2msi(img) {
+  return img.select(
+    ['B1','B2','B3','B4','B5','B6','B7','B8','B8A','B9','B11','B12'],
+    ['ultrablue','blue','green','red','rededge1','rededge2','rededge3',
+     'nir','rededge4','watervapor','swir1','swir2']
+  );
+}
+
+function makeaNDWI(image) {
+  var andwi = image.expression(
+    '((RED + GREEN + BLUE) - (NIR + SWIR1 + SWIR2)) / ' +
+    '((RED + GREEN + BLUE) + (NIR + SWIR1 + SWIR2))',
+    {
+      'BLUE':  image.select('blue'),
+      'RED':   image.select('red'),
+      'NIR':   image.select('nir'),
+      'GREEN': image.select('green'),
+      'SWIR1': image.select('swir1'),
+      'SWIR2': image.select('swir2')
+    }).rename('aNDWI');
+  return image.addBands(andwi);
+}
+
+function makeNDVI(image) {
+  var ndvi = image.normalizedDifference(['nir', 'red']).rename('NDVI');
+  return image.addBands(ndvi);
+}
+
+function selectWater(img) {
+  // Keep pixels that are:
+  //   - aNDWI >= 0   (water index positive)
+  //   - NDVI  < 0.2  (removes vegetation encroaching on river edges)
+  //   - blue  < 0.2  (removes bright sand / exposed sediment)
+  var waterMask = img.select('aNDWI').gte(0)
+    .and(img.select('NDVI').lt(0.2))
+    .and(img.select('blue').lt(0.2));
+  return img.updateMask(waterMask);
+}
+
+function prepS2msi(img) {
+  img = maskS2clouds(img);   // QA60 cloud mask
+  img = maskSCL(img);        // SCL cloud shadow + cloud mask
+  img = applyScaleFactors(img);
+  img = renameS2msi(img);
+  img = makeaNDWI(img);
+  img = makeNDVI(img);
+  img = selectWater(img);    // water pixels only
+  return img;
+}
+
+
+// ── 3. IMAGE COLLECTION ────────────────────────────────────────────────
+var S2Col = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+  .filterBounds(riverSegments)
+  .map(prepS2msi);
+
+
+// ── 4. COMBINED REDUCER ────────────────────────────────────────────────
+// Mean + StdDev + Median + Count in a single pass over each segment.
+// Output band names will be e.g. 'blue_mean', 'blue_stdDev', 
+// 'blue_median', 'blue_count'
+var bands = ['ultrablue','blue','green','red',
+             'rededge1','rededge2','rededge3',
+             'nir','rededge4','watervapor',
+             'swir1','swir2','aNDWI','NDVI'];
+
+var combinedReducer = ee.Reducer.mean()
+  .combine({reducer2: ee.Reducer.stdDev(), sharedInputs: true})
+  .combine({reducer2: ee.Reducer.median(), sharedInputs: true})
+  .combine({reducer2: ee.Reducer.count(),  sharedInputs: true});
+
+
+// ── 5. ZONAL STATS FUNCTION ────────────────────────────────────────────
+function zonalStatsRiver(ic, fc, params) {
+  var _params = {
+    reducer:        combinedReducer,
+    scale:          10,
+    crs:            'EPSG:32628',
+    bands:          bands,
+    imgProps:       ['GRANULE_ID', 'SPACECRAFT_NAME'],
+    imgPropsRename: ['img_id', 'satellite'],
+    datetimeName:   'date',
+    datetimeFormat: 'YYYY-MM-dd',
+    minPixels:      5    // discard segment×image pairs with fewer valid water pixels
+  };
+
+  if (params) {
+    for (var param in params) {
+      _params[param] = params[param] || _params[param];
+    }
+  }
+
+  var results = ic.map(function(img) {
+
+    img = ee.Image(img.select(_params.bands))
+      .set(_params.datetimeName, img.date().format(_params.datetimeFormat))
+      .set('timestamp', img.get('system:time_start'));
+
+    // Carry image-level metadata into output features
+    var propsFrom = ee.List(_params.imgProps)
+      .cat(ee.List([_params.datetimeName, 'timestamp']));
+    var propsTo = ee.List(_params.imgPropsRename)
+      .cat(ee.List([_params.datetimeName, 'timestamp']));
+    var imgProps = img.toDictionary(propsFrom).rename(propsFrom, propsTo);
+
+    // Only process segments that intersect this image's footprint
+    var fcSub = fc.filterBounds(img.geometry());
+
+    return img.reduceRegions({
+      collection: fcSub,
+      reducer:    _params.reducer,
+      scale:      _params.scale,
+      crs:        _params.crs
+    })
+    .map(function(f) {
+      return f.set(imgProps);
+    })
+    // Drop rows where too few water pixels were found —
+    // 'blue_count' is the pixel count from the combined reducer
+    .filter(ee.Filter.gte('blue_count', _params.minPixels));
+
+  }).flatten();
+
+  return results;
+}
+
+
+// ── 6. RUN ─────────────────────────────────────────────────────────────
+var params = {
+  scale:          10,
+  crs:            'EPSG:32628',
+  imgProps:       ['GRANULE_ID', 'SPACECRAFT_NAME'],
+  imgPropsRename: ['img_id', 'satellite'],
+  minPixels:      5
+};
+
+var riverStats = zonalStatsRiver(S2Col, riverSegments, params);
+print('Sample output (first 10 rows):', riverStats.limit(10));
+
+
+// ── 7. EXPORT ──────────────────────────────────────────────────────────
+Export.table.toDrive({
+  collection:   riverStats,
+  description:  'S2_Gambia_river_segments',
+  fileFormat:   'CSV',
+  selectors:    [
+    // segment identity and location
+    'seg_id', 'dist_start_km', 'dist_end_km',
+    // image metadata
+    'date', 'timestamp', 'img_id', 'satellite',
+    // reflectance statistics per band
+    'ultrablue_mean','ultrablue_stdDev','ultrablue_median','ultrablue_count',
+    'blue_mean',     'blue_stdDev',     'blue_median',     'blue_count',
+    'green_mean',    'green_stdDev',    'green_median',    'green_count',
+    'red_mean',      'red_stdDev',      'red_median',      'red_count',
+    'rededge1_mean', 'rededge1_stdDev', 'rededge1_median', 'rededge1_count',
+    'rededge2_mean', 'rededge2_stdDev', 'rededge2_median', 'rededge2_count',
+    'rededge3_mean', 'rededge3_stdDev', 'rededge3_median', 'rededge3_count',
+    'nir_mean',      'nir_stdDev',      'nir_median',      'nir_count',
+    'rededge4_mean', 'rededge4_stdDev', 'rededge4_median', 'rededge4_count',
+    'watervapor_mean','watervapor_stdDev','watervapor_median','watervapor_count',
+    'swir1_mean',    'swir1_stdDev',    'swir1_median',    'swir1_count',
+    'swir2_mean',    'swir2_stdDev',    'swir2_median',    'swir2_count',
+    'aNDWI_mean',    'aNDWI_stdDev',    'aNDWI_median',    'aNDWI_count',
+    'NDVI_mean',     'NDVI_stdDev',     'NDVI_median',     'NDVI_count'
+  ]
+});
