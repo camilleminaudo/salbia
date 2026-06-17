@@ -6,6 +6,25 @@
 
 # ---
 
+# As saltwater intrudes upstream, you'd expect:
+#
+# TSS proxy (red, SWIR) — saltwater is clearer than turbid freshwater in the
+# Gambia, so a drop in red/SWIR moving downstream marks the fresh/saline
+# transition
+
+# CDOM proxy (blue/green ratio, blue/red) —  CDOM is freshwater-sourced; you'd
+# expect a downstream increase in blue ratios where CDOM drops off in the saline
+# wedge
+
+# Algae/chlorophyll (green, NIR/red) — the halocline can drive productivity
+# gradients; look for spatial peaks near the front
+
+# Blue/red or blue/green ratio — probably the best single proxy; saltwater has
+# higher blue reflectance relative to red than turbid fresh water
+
+# ---
+
+
 rm(list = ls()) # clear workspace
 cat("/014") # clear console
 
@@ -20,7 +39,6 @@ require(dplyr)
 library(sf)
 library(data.table)
 library(mgcv)
-
 
 scriptpath <- dirname(rstudioapi::getSourceEditorContext()$path) # path of current script file
 path_repo_root <- dirname(scriptpath) # path to the cloned repo
@@ -249,213 +267,662 @@ cat("Saved peak metrics and GAM profiles for all metrics\n")
 
 
 
+setwd(datapath)
+df_peaks <- fread("longitudinal_peaks_allmetrics.csv")
+df_peaks[, date := as.Date(date)]
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# ── coverage filter ────────────────────────────────────────────────────
-counts_repetitive <- table(sort(dt_aligned$date))
-minimum_coverage  <- 300
-well_covered      <- as.Date(names(counts_repetitive[counts_repetitive > minimum_coverage]))
-
-# search window for the saline front
-dist_min   <- 50
-dist_max   <- 300
-min_pts    <- 30
-min_r2_gam <- 0.3   # minimum GAM deviance explained to trust the fit
-k_gam      <- 20
-tol        <- 0     # date tolerance in days
-
-# ── main loop ──────────────────────────────────────────────────────────
-peak_list    <- vector("list", length(well_covered))
-data_list    <- vector("list", length(well_covered))
-modeled_list <- vector("list", length(well_covered))
-
-for (i in seq_along(well_covered)) {
-  d <- as.Date(well_covered[i])
-  
-  data_d <- dt_aligned[date >= d - tol/2 & date <= d + tol/2]
-  data_d <- data_d[blue > 0 & is.finite(rb_zscore_date)]
-  
-  data_d_restrict <- data_d[d_from_basse > dist_min & d_from_basse < dist_max]
-  
-  # ── basic validity checks ──────────────────────────────────────────
-  n_pts     <- nrow(data_d_restrict)
-  n_sensors <- uniqueN(data_d_restrict$sensor)
-  
-  if (n_pts < min_pts) {
-    message("Skipping ", d, ": only ", n_pts, " points in search window")
-    next
-  }
-  
-  # ── fit GAM with convergence guard ────────────────────────────────
-  mod <- tryCatch(
-    gam(rb_zscore_date ~ s(d_from_basse, k = k_gam),
-        data    = data_d_restrict,
-        method  = "REML"),
-    error = function(e) {
-      message("GAM failed on ", d, ": ", e$message)
-      NULL
-    }
+# Pre-compute derived columns ONCE on the full dataframe
+df_peaks <- df_peaks |>
+  mutate(
+    doy    = lubridate::yday(date),
+    month  = lubridate::month(date, label = TRUE),
+    year   = lubridate::year(date),
+    decade = as.factor(paste0(floor(year / 10) * 10, "s"))
   )
-  if (is.null(mod)) next
+
+df_peaks_split <- split(df_peaks, df_peaks$metric)
+
+metrics <- unique(df_peaks$metric)
+
+
+df_peaks_green <- df_peaks_split[["green_zscore"]]
+
+ggplot(df_peaks_green, aes(doy, dist_peak))+geom_point()+theme_article()
+
+ggplot(df_peaks_green[df_peaks_green$dist_peak>100 & df_peaks_green$dist_peak < 250 & df_peaks_green$year>215,], aes(date, dist_peak))+
+  geom_point()+
+  geom_smooth(method = "lm")+
+  theme_article()+facet_wrap(month~.)
+
+
+
+
+
+
+
+
+# Filter to reliable fits and candidate metrics
+front_proxies <- c("green_zscore", "blue_zscore", "red_zscore", 
+                   "red_blue_zscore", "red_green_zscore", "green_blue_zscore")
+df_hov <- df_peaks[
+  peak_at_edge == FALSE & metric %in% front_proxies
+]
+
+ggplot(df_hov, aes(x = date, y = dist_peak)) +
+  geom_point(aes(colour = peak_pred), size = 0.4, alpha = 0.6) +
+  geom_smooth(method = "loess", span = 0.15, 
+              colour = "white", linewidth = 0.7, se = FALSE) +
+  scale_colour_viridis_c(option = "A", name = "Peak\nzscore") +
+  scale_x_date(date_breaks = "5 years", date_labels = "%Y") +
+  facet_wrap(~ metric, ncol = 2) +
+  labs(
+    title    = "GAM peak location over time — saline front proxy",
+    subtitle = "Distance of spectral peak from Basse; filtered to non-edge peaks",
+    x        = NULL,
+    y        = "Distance from Basse [km]"
+  ) +
+  theme_article() +
+  theme(panel.spacing = unit(1, "lines"))
+
+
+ggplot(df_hov, aes(x = as.numeric(month), y = dist_peak)) +
+  geom_jitter(aes(colour = decade), width = 0.2, size = 0.3, alpha = 0.2) +
+  geom_smooth(aes(group = decade, colour = decade),
+              method = "loess", span = 0.5, linewidth = 0.9, se = FALSE) +
+  scale_colour_viridis_d(option = "C", begin = 0.1, end = 0.9) +
+  scale_x_continuous(breaks = 1:12, labels = month.abb) +
+  facet_wrap(~ metric, ncol = 2) +
+  labs(
+    title = "Seasonal cycle of front position by decade",
+    x     = NULL,
+    y     = "Distance from Basse [km]",
+    colour = "Decade"
+  ) +
+  theme_article()
+
+
+
+
+# Wider FWHM = more diffuse/gradual front — interesting secondary signal
+ggplot(df_hov, aes(x = date, y = FWHM)) +
+  geom_point(aes(colour = month), size = 0.4, alpha = 0.5) +
+  geom_smooth(method = "loess", span = 0.2,
+              colour = "white", linewidth = 0.7, se = FALSE) +
+  scale_colour_viridis_d(option = "D") +
+  facet_wrap(~ metric, ncol = 2) +
+  labs(
+    title = "Peak width (FWHM) over time — front sharpness proxy",
+    y     = "FWHM [km]", x = NULL
+  ) +
+  theme_article()
+
+
+# Correlate dist_peak across metrics for the same date
+# If metrics are coherent proxies, their dist_peak should correlate
+df_wide <- dcast(
+  df_hov[, .(date, metric, dist_peak)],
+  date ~ metric, value.var = "dist_peak"
+)
+
+# Quick pairs plot
+library(GGally)
+ggpairs(df_wide[, -1], 
+        upper = list(continuous = wrap("cor", size = 2.5)),
+        lower = list(continuous = wrap("points", alpha = 0.1, size = 0.3)),
+        diag  = list(continuous = wrap("densityDiag"))) +
+  theme_article()
+
+
+
+
+
+
+
+
+
+# ── 1. Compute seasonal climatology and anomaly ──────────────────────────────
+
+df_anom <- df_peaks[peak_at_edge == FALSE & metric %in% front_proxies] |>
   
-  # GAM fit quality
-  dev_expl <- summary(mod)$dev.expl   # deviance explained (analogous to R²)
-  k_check  <- k.check(mod)            # check if k is large enough
-  k_ok     <- all(k_check[, "p-value"] > 0.05)
-  edf <- sum(mod$edf)   # total effective df used
+  # Monthly climatology per metric (mean + sd for normalisation)
+  _[, `:=`(
+    clim_mean = mean(dist_peak, na.rm = TRUE),
+    clim_sd   = sd(dist_peak,   na.rm = TRUE)
+  ), by = .(metric, month)] |>
   
-  if (dev_expl < min_r2_gam) {
-    message("Skipping ", d, ": GAM deviance explained = ",
-            round(dev_expl, 3), " < ", min_r2_gam)
-    next
-  }
+  # Standardised anomaly (z-score flavour) and raw anomaly
+  _[, `:=`(
+    anom_raw  = dist_peak - clim_mean,
+    anom_std  = (dist_peak - clim_mean) / clim_sd
+  )] |>
   
-  # ── predict over fine grid ─────────────────────────────────────────
-  newd <- data.frame(
-    d_from_basse = seq(min(data_d_restrict$d_from_basse),
-                       max(data_d_restrict$d_from_basse),
-                       by = 0.5)   # 500 m resolution
+  # Annual mean anomaly for trend line
+  _[, anom_annual := mean(anom_raw, na.rm = TRUE), by = .(metric, year)]
+
+
+# ── 2. Hovmöller-style anomaly plot ─────────────────────────────────────────
+
+p_anom <- ggplot(df_anom, aes(x = date, y = anom_raw)) +
+  
+  # Zero reference
+  geom_hline(yintercept = 0, colour = "grey60", linewidth = 0.4, linetype = "dashed") +
+  
+  # Raw anomaly points
+  geom_point(aes(colour = anom_raw), size = 0.3, alpha = 0.4) +
+  
+  # Smooth interannual trend
+  geom_smooth(
+    method    = "loess",
+    formula   = y ~ x,
+    span      = 0.3,          # wider span = more interannual, less monthly noise
+    colour    = "white",
+    fill      = "grey30",
+    linewidth = 0.9,
+    alpha     = 0.3,
+    se        = TRUE
+  ) +
+  
+  scale_colour_gradient2(
+    low      = "#2166ac",   # downstream (saltwater intrusion retreating)
+    mid      = "grey90",
+    high     = "#d6604d",   # upstream (saltwater pushing further in)
+    midpoint = 0,
+    name     = "Anomaly\n[km]"
+  ) +
+  scale_x_date(date_breaks = "5 years", date_labels = "%Y") +
+  
+  facet_wrap(~ metric, ncol = 2) +
+  labs(
+    title    = "Interannual anomaly of front position",
+    subtitle = "Deseasonalised: monthly climatology subtracted per metric | positive = front further upstream",
+    x        = NULL,
+    y        = "Distance anomaly from climatology [km]"
+  ) +
+  theme_article() +
+  theme(panel.spacing = unit(1, "lines"))
+
+
+# ── 3. Annual mean anomaly — cleaner trend signal ────────────────────────────
+
+df_annual <- df_anom[, .(
+  anom_annual = mean(anom_raw, na.rm = TRUE),
+  anom_sd     = sd(anom_raw,   na.rm = TRUE),
+  n           = .N
+), by = .(metric, year)][
+  n >= 3  # drop years with very few observations
+]
+
+p_annual <- ggplot(df_annual, aes(x = year, y = anom_annual)) +
+  
+  geom_hline(yintercept = 0, colour = "grey60", linewidth = 0.4, linetype = "dashed") +
+  
+  # Uncertainty ribbon (±1 sd)
+  geom_ribbon(
+    aes(ymin = anom_annual - anom_sd,
+        ymax = anom_annual + anom_sd),
+    fill  = "grey40",
+    alpha = 0.25
+  ) +
+  
+  # Annual means
+  geom_point(aes(colour = anom_annual, size = n), alpha = 0.8) +
+  
+  # Trend line
+  geom_smooth(
+    method    = "loess",
+    formula   = y ~ x,
+    span      = 0.5,
+    colour    = "white",
+    linewidth = 0.9,
+    se        = FALSE
+  ) +
+  
+  scale_colour_gradient2(
+    low      = "#2166ac",
+    mid      = "grey90",
+    high     = "#d6604d",
+    midpoint = 0,
+    name     = "Anomaly\n[km]",
+    guide    = "none"   # already encoded in y-axis
+  ) +
+  scale_size_continuous(range = c(1, 4), name = "n obs") +
+  scale_x_continuous(breaks = seq(1984, 2026, 5)) +
+  
+  facet_wrap(~ metric, ncol = 2) +
+  labs(
+    title    = "Annual mean front position anomaly",
+    subtitle = "±1 SD ribbon | point size = number of observations | positive = front further upstream",
+    x        = NULL,
+    y        = "Annual mean anomaly [km]"
+  ) +
+  theme_article() +
+  theme(panel.spacing = unit(1, "lines"))
+
+
+# ── 4. Save both ─────────────────────────────────────────────────────────────
+
+# ggsave(file.path(plotpath, "front_anomaly_timeseries.jpg"),
+#        p_anom,   width = 12, height = 10)
+# 
+# ggsave(file.path(plotpath, "front_anomaly_annual.jpg"),
+#        p_annual, width = 12, height = 10)
+
+
+
+
+
+
+
+
+
+
+
+
+
+modeled_all <- fread("longitudinal_gam_profiles_allmetrics.csv")
+modeled_all[, date := as.Date(date)]
+
+modeled_all$decade <- as.factor(paste(floor(modeled_all$year/10)*10, "s",sep = ""))
+
+
+# my metric
+mymetric = "green_zscore"
+myname =   "Green\nzscore"
+
+# ── 1. Filter to green_blue and aggregate onto a 2D grid ────────────────────
+
+df_grid <- modeled_all[
+  metric == mymetric
+][,
+  dist_bin := round(d_from_basse / 5) * 5
+][,
+  `:=`(
+    month_grp  = data.table::month(date),   # explicit namespace avoids clash
+    decade_grp = as.integer(format(date, "%Y")) %/% 10 * 10
   )
-  pred_se      <- predict(mod, newd, se.fit = TRUE)
-  newd$pred    <- pred_se$fit
-  newd$pred_se <- pred_se$se.fit
-  newd$pred_lo <- newd$pred - 1.96 * newd$pred_se
-  newd$pred_hi <- newd$pred + 1.96 * newd$pred_se
-  newd$date    <- d
+][,
+  .(
+    mean_pred = mean(pred, na.rm = TRUE),
+    n         = .N
+  ),
+  by = .(decade_grp, month_grp, dist_bin)
+][
+  n >= 3
+]
+
+
+df_grid$dist_ocean <- -(df_grid$dist_bin-414.63) # Basse is 414.63 km away from the ocean (defined as seg_id = 831)
+
+
+# ── 2. Heatmaps ───────────────────────────────────────────────────────────────
+# Aggregate across decades for the non-faceted plot
+df_grid_all <- df_grid[,
+                       .(mean_pred = mean(mean_pred, na.rm = TRUE),
+                         n         = sum(n)),
+                       by = .(dist_ocean, month_grp)
+][n >= 3]
+
+p_heatmap <- ggplot(df_grid_all, aes(x = dist_ocean, y = month_grp)) +
   
-  # ── slope along profile ────────────────────────────────────────────
-  newd$slope <- c(NA, diff(newd$pred) / diff(newd$d_from_basse))
+  geom_tile(aes(fill = mean_pred), colour = NA) +
   
-  # ── peak detection ─────────────────────────────────────────────────
-  peak_row  <- newd[which.max(newd$pred), ]
-  peak_dist <- peak_row$d_from_basse
-  peak_pred <- peak_row$pred
+  # Contour: inherit only z, not fill
+  geom_contour(
+    aes(z = mean_pred),        # no fill here
+    colour    = "white",
+    linewidth = 0.35,
+    alpha     = 0.9,
+    breaks    = c(-1, -0.5, 0, 0.5, 1)
+  ) +
   
-  # Flag if peak is at the edge of the search window (unreliable)
-  edge_buffer <- 5   # km
-  peak_at_edge <- peak_dist <= (dist_min + edge_buffer) |
-    peak_dist >= (dist_max - edge_buffer)
+  scale_fill_gradient2(
+    low      = "#1d4e89",
+    mid      = "#f7f7f7",
+    high     = "#386641",
+    midpoint = 0,
+    limits   = c(-1.5, 1.5),
+    oob      = scales::squish,
+    name     = myname,
+    na.value = "grey15"
+  ) +
   
-  # Flag if profile is monotonic (no real peak — front outside window)
-  pred_range   <- max(newd$pred) - min(newd$pred)
-  is_monotonic <- pred_range < 0.5   # less than 0.5 z-score units of variation
+  scale_x_continuous(
+    breaks    = seq(50, 300, 50),
+    expand    = c(0, 0),
+    transform = "reverse"
+  ) +
   
-  # ── FWHM — guard against profiles that never cross halfmax ─────────
-  halfmax      <- (max(newd$pred) + min(newd$pred)) / 2
-  above_half   <- newd$d_from_basse[newd$pred >= halfmax]
+  scale_y_continuous(
+    breaks = 1:12,
+    labels = month.abb,
+    trans  = "reverse"         # Jan at top
+  ) +
   
-  if (length(above_half) >= 2) {
-    FWHM       <- diff(range(above_half))
-    FWHM_valid <- TRUE
-  } else {
-    FWHM       <- NA_real_
-    FWHM_valid <- FALSE
-  }
+  labs(
+    title    = "Green band — GAM-modelled longitudinal profiles",
+    subtitle = "Monthly × distance profiles",
+    x        = "Distance from the ocean [km]",
+    y        = NULL,
+    caption  = "Mean of GAM-predicted zscores; 5 km distance bins"
+  ) +
   
-  # ── slope metrics ──────────────────────────────────────────────────
-  # Upstream of peak: rising slope (fresh → saline transition)
-  # Downstream of peak: declining slope (saline → marine transition)
-  slopes_before <- newd$slope[newd$d_from_basse < peak_dist & newd$slope > 0]
-  slopes_after  <- newd$slope[newd$d_from_basse > peak_dist & newd$slope < 0]
-  
-  avg_rise    <- if (length(slopes_before) > 0) mean(slopes_before) else NA_real_
-  avg_decline <- if (length(slopes_after)  > 0) mean(slopes_after)  else NA_real_
-  
-  # Max slope on each side — steepness of the front
-  max_rise    <- if (length(slopes_before) > 0) max(slopes_before)  else NA_real_
-  max_decline <- if (length(slopes_after)  > 0) min(slopes_after)   else NA_real_
-  
-  # ── store results ──────────────────────────────────────────────────
-  peak_list[[i]] <- data.frame(
-    date          = d,
-    n_pts         = n_pts,
-    n_sensors     = n_sensors,
-    dev_expl      = round(dev_expl, 3),
-    edf           = round(edf, 1),
-    k_used        = k_gam,
-    k_adequate    = k_ok,
-    peak_pred     = peak_pred,
-    dist_peak     = peak_dist,
-    peak_at_edge  = peak_at_edge,
-    is_monotonic  = is_monotonic,
-    FWHM          = FWHM,
-    FWHM_valid    = FWHM_valid,
-    avg_rise      = avg_rise,
-    max_rise      = max_rise,
-    avg_decline   = avg_decline,
-    max_decline   = max_decline
+  theme_article() +
+  theme(
+    strip.text        = element_text(face = "bold", size = 10),
+    axis.text.x       = element_text(size = 7),
+    axis.text.y       = element_text(size = 7),
+    legend.key.height = unit(2.5, "lines"),
+    plot.caption      = element_text(colour = "grey50", size = 7)
   )
+
+
+
+p_heatmap_decade <- p_heatmap + df_grid +   # swap data back to full df_grid
+  geom_text(aes(label = ifelse(n < 10, "·", ""))) +
+  facet_wrap(~decade_grp, ncol = 2)
+
+
+ggsave(
+  file.path(plotpath, paste0("heatmap_gam_",mymetric,".jpg")),
+  p_heatmap,
+  width  = 8,
+  height = 4,
+  dpi    = 300
+)
+
+
+ggsave(
+  file.path(plotpath, paste0("heatmap_gam_decade_",mymetric,".jpg")),
+  p_heatmap_decade,
+  width  = 12,
+  height = 10,
+  dpi    = 300
+)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ggplot(df_peaks, aes(dist_peak)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  geom_vline(xintercept = k_gam - 1, linetype = "dashed", color = "tomato") +
+  facet_wrap(~ metric, scales = "free_y") +
+  labs(title = "Peaks in longitudinal profile",
+       x = "dist_peak", y = "count") +
+  theme_bw(base_size = 7)
+
+ggplot(df_peaks, aes(max_decline)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  # geom_vline(xintercept = k_gam - 1, linetype = "dashed", color = "tomato") +
+  facet_wrap(~ metric, scales = "free_y") +
+  # labs(title = "Peaks in longitudinal profile",
+  #      x = "dist_peak", y = "count") +
+  theme_bw(base_size = 7)
+
+
+
+
+
+
+plot_monthly_patterns <- function(modelled, metric) {
   
-  data_list[[i]]    <- data_d
-  modeled_list[[i]] <- newd
+  ggplot(modelled, aes(d_from_basse, pred)) +
+    
+    # Individual lines — muted, thin, in the background
+    geom_line(
+      aes(group = date, colour = decade),
+      linewidth = 0.15,
+      alpha     = 0.15
+    ) +
+    
+    # Confidence ribbon — subtle fill matching the overall tone
+    geom_smooth(
+      method    = "loess",
+      formula   = y ~ x,
+      colour    = "#000080",        # clean white line pops over the ribbon
+      fill      = "#2d2d2d",      # dark neutral ribbon (adjust to your theme)
+      linewidth = 0.9,
+      alpha     = 0.35,
+      se        = F
+    ) +
+    
+    scale_colour_viridis_d(
+      option    = "C",
+      begin     = 0.1,
+      end       = 0.9,
+      direction = 1,
+      guide     = guide_legend(
+        override.aes = list(alpha = 1, linewidth = 0.8)  # legend lines fully visible
+      )
+    ) +
+    
+    labs(
+      title    = paste0("Modelled ", metric, " longitudinal profile"),
+      subtitle = "Monthly patterns with LOESS trend",
+      x        = "Distance from Basse [km]",
+      y        = metric,
+      colour   = "Decade"
+    ) +
+    
+    ylim(c(-5,5))+
+    
+    theme_article() +
+    theme(
+      strip.text       = element_text(face = "bold", size = 9),
+      panel.spacing    = unit(0.8, "lines"),   # breathe between facets
+      legend.key.width = unit(1.5, "lines")    # longer swatch in legend
+    ) +
+    
+    facet_wrap(~ month, nrow = 3)  # 3 rows × 4 cols is tidy for 12 months
 }
 
 
-# ── assemble results ───────────────────────────────────────────────────
-df_Rpeak       <- rbindlist(peak_list,    fill = TRUE)
-data_d.all     <- rbindlist(data_list,    fill = TRUE)
-modeled.red2blue <- rbindlist(modeled_list, fill = TRUE)
+# Pre-compute derived columns ONCE on the full dataframe
+modeled_all <- modeled_all |>
+  mutate(
+    month  = lubridate::month(date, label = TRUE),
+    year   = lubridate::year(date),
+    decade = as.factor(paste0(floor(year / 10) * 10, "s"))
+  )
 
-# ── quality flags summary ──────────────────────────────────────────────
-cat("Total dates processed:       ", nrow(df_Rpeak), "\n")
-cat("Dates with edge peak:        ", sum(df_Rpeak$peak_at_edge,  na.rm=TRUE), "\n")
-cat("Dates flagged as monotonic:  ", sum(df_Rpeak$is_monotonic,  na.rm=TRUE), "\n")
-cat("Dates with invalid FWHM:     ", sum(!df_Rpeak$FWHM_valid,   na.rm=TRUE), "\n")
-cat("Dates with k inadequate:     ", sum(!df_Rpeak$k_adequate,   na.rm=TRUE), "\n")
+modeled_split <- split(modeled_all, modeled_all$metric)
 
 
-hist(df_Rpeak$edf, breaks = 30,
-     main = "Distribution of GAM effective df across dates",
-     xlab = "edf")
+library(parallel)
+library(pbapply)  # optional: adds a progress bar
+
+metrics <- unique(df_peaks$metric)
+
+pblapply(metrics, function(metric) {
+  mymod <- modeled_split[[metric]]
+  
+  p <- plot_monthly_patterns(modelled = mymod, metric = metric)
+  
+  ggsave(
+    filename = file.path(plotpath, paste0("longitudinal_patterns_", metric, ".jpg")),
+    plot     = p,
+    width    = 8,
+    height   = 5
+  )
+  cat("Saved:", metric, "\n")
+}, cl = max(1, detectCores() - 1))
+
+
+
+
+
+
+# OLD VERSION
+
+# 
+# # ── coverage filter ────────────────────────────────────────────────────
+# counts_repetitive <- table(sort(dt_aligned$date))
+# minimum_coverage  <- 300
+# well_covered      <- as.Date(names(counts_repetitive[counts_repetitive > minimum_coverage]))
+# 
+# # search window for the saline front
+# dist_min   <- 50
+# dist_max   <- 300
+# min_pts    <- 30
+# min_r2_gam <- 0.3   # minimum GAM deviance explained to trust the fit
+# k_gam      <- 20
+# tol        <- 0     # date tolerance in days
+# 
+# # ── main loop ──────────────────────────────────────────────────────────
+# peak_list    <- vector("list", length(well_covered))
+# data_list    <- vector("list", length(well_covered))
+# modeled_list <- vector("list", length(well_covered))
+# 
+# for (i in seq_along(well_covered)) {
+#   d <- as.Date(well_covered[i])
+#   
+#   data_d <- dt_aligned[date >= d - tol/2 & date <= d + tol/2]
+#   data_d <- data_d[blue > 0 & is.finite(rb_zscore_date)]
+#   
+#   data_d_restrict <- data_d[d_from_basse > dist_min & d_from_basse < dist_max]
+#   
+#   # ── basic validity checks ──────────────────────────────────────────
+#   n_pts     <- nrow(data_d_restrict)
+#   n_sensors <- uniqueN(data_d_restrict$sensor)
+#   
+#   if (n_pts < min_pts) {
+#     message("Skipping ", d, ": only ", n_pts, " points in search window")
+#     next
+#   }
+#   
+#   # ── fit GAM with convergence guard ────────────────────────────────
+#   mod <- tryCatch(
+#     gam(rb_zscore_date ~ s(d_from_basse, k = k_gam),
+#         data    = data_d_restrict,
+#         method  = "REML"),
+#     error = function(e) {
+#       message("GAM failed on ", d, ": ", e$message)
+#       NULL
+#     }
+#   )
+#   if (is.null(mod)) next
+#   
+#   # GAM fit quality
+#   dev_expl <- summary(mod)$dev.expl   # deviance explained (analogous to R²)
+#   k_check  <- k.check(mod)            # check if k is large enough
+#   k_ok     <- all(k_check[, "p-value"] > 0.05)
+#   edf <- sum(mod$edf)   # total effective df used
+#   
+#   if (dev_expl < min_r2_gam) {
+#     message("Skipping ", d, ": GAM deviance explained = ",
+#             round(dev_expl, 3), " < ", min_r2_gam)
+#     next
+#   }
+#   
+#   # ── predict over fine grid ─────────────────────────────────────────
+#   newd <- data.frame(
+#     d_from_basse = seq(min(data_d_restrict$d_from_basse),
+#                        max(data_d_restrict$d_from_basse),
+#                        by = 0.5)   # 500 m resolution
+#   )
+#   pred_se      <- predict(mod, newd, se.fit = TRUE)
+#   newd$pred    <- pred_se$fit
+#   newd$pred_se <- pred_se$se.fit
+#   newd$pred_lo <- newd$pred - 1.96 * newd$pred_se
+#   newd$pred_hi <- newd$pred + 1.96 * newd$pred_se
+#   newd$date    <- d
+#   
+#   # ── slope along profile ────────────────────────────────────────────
+#   newd$slope <- c(NA, diff(newd$pred) / diff(newd$d_from_basse))
+#   
+#   # ── peak detection ─────────────────────────────────────────────────
+#   peak_row  <- newd[which.max(newd$pred), ]
+#   peak_dist <- peak_row$d_from_basse
+#   peak_pred <- peak_row$pred
+#   
+#   # Flag if peak is at the edge of the search window (unreliable)
+#   edge_buffer <- 5   # km
+#   peak_at_edge <- peak_dist <= (dist_min + edge_buffer) |
+#     peak_dist >= (dist_max - edge_buffer)
+#   
+#   # Flag if profile is monotonic (no real peak — front outside window)
+#   pred_range   <- max(newd$pred) - min(newd$pred)
+#   is_monotonic <- pred_range < 0.5   # less than 0.5 z-score units of variation
+#   
+#   # ── FWHM — guard against profiles that never cross halfmax ─────────
+#   halfmax      <- (max(newd$pred) + min(newd$pred)) / 2
+#   above_half   <- newd$d_from_basse[newd$pred >= halfmax]
+#   
+#   if (length(above_half) >= 2) {
+#     FWHM       <- diff(range(above_half))
+#     FWHM_valid <- TRUE
+#   } else {
+#     FWHM       <- NA_real_
+#     FWHM_valid <- FALSE
+#   }
+#   
+#   # ── slope metrics ──────────────────────────────────────────────────
+#   # Upstream of peak: rising slope (fresh → saline transition)
+#   # Downstream of peak: declining slope (saline → marine transition)
+#   slopes_before <- newd$slope[newd$d_from_basse < peak_dist & newd$slope > 0]
+#   slopes_after  <- newd$slope[newd$d_from_basse > peak_dist & newd$slope < 0]
+#   
+#   avg_rise    <- if (length(slopes_before) > 0) mean(slopes_before) else NA_real_
+#   avg_decline <- if (length(slopes_after)  > 0) mean(slopes_after)  else NA_real_
+#   
+#   # Max slope on each side — steepness of the front
+#   max_rise    <- if (length(slopes_before) > 0) max(slopes_before)  else NA_real_
+#   max_decline <- if (length(slopes_after)  > 0) min(slopes_after)   else NA_real_
+#   
+#   # ── store results ──────────────────────────────────────────────────
+#   peak_list[[i]] <- data.frame(
+#     date          = d,
+#     n_pts         = n_pts,
+#     n_sensors     = n_sensors,
+#     dev_expl      = round(dev_expl, 3),
+#     edf           = round(edf, 1),
+#     k_used        = k_gam,
+#     k_adequate    = k_ok,
+#     peak_pred     = peak_pred,
+#     dist_peak     = peak_dist,
+#     peak_at_edge  = peak_at_edge,
+#     is_monotonic  = is_monotonic,
+#     FWHM          = FWHM,
+#     FWHM_valid    = FWHM_valid,
+#     avg_rise      = avg_rise,
+#     max_rise      = max_rise,
+#     avg_decline   = avg_decline,
+#     max_decline   = max_decline
+#   )
+#   
+#   data_list[[i]]    <- data_d
+#   modeled_list[[i]] <- newd
+# }
+# 
+# 
+# # ── assemble results ───────────────────────────────────────────────────
+# df_Rpeak       <- rbindlist(peak_list,    fill = TRUE)
+# data_d.all     <- rbindlist(data_list,    fill = TRUE)
+# modeled.red2blue <- rbindlist(modeled_list, fill = TRUE)
+# 
+# # ── quality flags summary ──────────────────────────────────────────────
+# cat("Total dates processed:       ", nrow(df_Rpeak), "\n")
+# cat("Dates with edge peak:        ", sum(df_Rpeak$peak_at_edge,  na.rm=TRUE), "\n")
+# cat("Dates flagged as monotonic:  ", sum(df_Rpeak$is_monotonic,  na.rm=TRUE), "\n")
+# cat("Dates with invalid FWHM:     ", sum(!df_Rpeak$FWHM_valid,   na.rm=TRUE), "\n")
+# cat("Dates with k inadequate:     ", sum(!df_Rpeak$k_adequate,   na.rm=TRUE), "\n")
+# 
+# 
+# hist(df_Rpeak$edf, breaks = 30,
+#      main = "Distribution of GAM effective df across dates",
+#      xlab = "edf")
 
 
 
