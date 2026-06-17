@@ -45,20 +45,15 @@ names(river_segs) <- c("fid","seg_id",
                        "from_ocean_start", "from_oce_end", "geometry"  )
 
 
-
 # ── load in situ data ────────────────────────────────────
 insitu <- read.csv(
-  file.path(path_repo_root, "data/in_situ/2026_Final_MasterData.csv"),
+  file.path(path_repo_root, "data/in_situ/2026_Final_MasterData_v20260615.csv"),
   skip    = 1,
   dec     = ".",  
   na.strings = c("", "NA", "N/A", "nd", "ND", "-", " ", "#VALUE!")  # catch all common NA codes
 )
 insitu$date <- as.Date(insitu$date, format = "%d/%m/%Y")
 
-v <- "NO3"
-bad <- insitu[[v]][is.na(suppressWarnings(as.numeric(insitu[[v]])))]
-bad <- bad[!is.na(bad)]
-unique(bad)
 
 
 # After loading, find all character columns that look like
@@ -66,8 +61,14 @@ unique(bad)
 char_cols <- names(insitu)[sapply(insitu, is.character)]
 char_cols
 
+v <- "NO3"
+bad <- insitu[[v]][is.na(suppressWarnings(as.numeric(insitu[[v]])))]
+bad <- bad[!is.na(bad)]
+unique(bad)
 
-for (v in c("depth","depth_max","PSI","SRP","NO2","NH4","TSS","Cl","Br","NO3")) {
+
+
+for (v in c("depth","depth_max","PSI","SRP","NO2","NH4...41","Cl","Br","NO3")) {
   sample_vals <- insitu[[v]][!is.na(insitu[[v]])]
   # Check if replacing comma with dot makes them numeric
   converted <- suppressWarnings(
@@ -81,12 +82,199 @@ for (v in c("depth","depth_max","PSI","SRP","NO2","NH4","TSS","Cl","Br","NO3")) 
   }
 }
 
+
 # Verify
 str(insitu)
 
+# Clean station names
+# t_to_s <- c(T01 = "S01", T02 = "S02", T05 = "S05", T06 = "S06",
+#             T08 = "S08", T10 = "S10", T11 = "S11", T12 = "S12")
+# insitu <- insitu %>%
+#   mutate(site_id = recode(site_id, !!!t_to_s))
+
+insitu %>% distinct(site_id, site_name) %>% arrange(site_id)
+
+site_names_clean <- tribble(
+  ~site_id, ~site_name,
+  "S01", "Tendaba",
+  "S02", "Bamba Tenda",
+  "S03", "Kalagi",
+  "S04", "Wali Kunda",
+  "S05", "Kauur",
+  "S06", "Kuntaur",
+  "S07", "Bansang",
+  "S08", "Jarreng Tenda",
+  "S09", "Basse",
+  "S10", "Kemoto",
+  "S11", "Bonto Tenda",
+  "S12", "Bureng",
+  "S13", "Ocean"
+)
+
+insitu <- insitu %>%
+  select(-site_name) %>%
+  left_join(site_names_clean, by = "site_id")
+
+insitu$site_name[is.na(insitu$site_name)] <- "Longitudinal"
+
+# ── load in situ sensor data ────────────────────────────────────
+sensors_salbia <- read.csv(
+  file.path(path_repo_root, "data/in_situ/data_HOBOs_2025_clean.csv"),
+  dec     = ".",  
+  na.strings = c("", "NA", "N/A", "nd", "ND", "-", " ", "#VALUE!")  # catch all common NA codes
+)
+sensors_salbia$datetime <- ymd_hms(sensors_salbia$Date_GMT, tz = "UTC")
+
+
+sensors_wgr <- read.csv(
+  file.path(path_repo_root, "data/in_situ/data_WGR_salinity_clean.csv"),
+  dec     = ".",  
+  na.strings = c("", "NA", "N/A", "nd", "ND", "-", " ", "#VALUE!")  # catch all common NA codes
+)
+sensors_wgr$datetime <- ymd_hms(sensors_wgr$Date, tz = "UTC")
+unique(sensors_wgr$Station_Name)
+
+
+ggplot(sensors_wgr, aes(datetime, Salinity ))+geom_path()+theme_bw()+facet_wrap(Station_Name~.)
+
+
+
+crosswalk <- tribble(
+  ~source,   ~sensor_name,      ~site_id,
+  "salbia",  "Tendaba",         "S01",
+  "salbia",  "Bamba Tenda",     "S02",
+  "salbia",  "Wali Kunda",      "S04",
+  "salbia",  "Kaur Wharf",      "S05",
+  "salbia",  "Kuntaur",         "S06",
+  "salbia",  "Basse",           "S09",
+  "salbia",  "Kemoto",          "S10",
+  "wgr",     "Tendaba",         "S01",
+  "wgr",     "Bansang",         "S07",
+  "wgr",     "Basse",           "S09",
+  "wgr",     "Kaur",            "S05",
+  "wgr",     "Kuntaur",         "S06",
+  "wgr",     "Ballingho",       NA_character_,
+  "wgr",     "Banjul Harbour",  NA_character_,
+  "wgr",     "Pakaliba",        NA_character_
+)
+
+site_coords <- insitu %>%
+  filter(!is.na(site_id)) %>%
+  distinct(site_id, latitude, longitude) %>%
+  group_by(site_id) %>%
+  summarise(latitude = first(latitude), longitude = first(longitude), .groups = "drop")
+
+daily_salbia <- sensors_salbia %>%
+  mutate(date = as.Date(datetime)) %>%
+  group_by(Station_Name, date) %>%
+  summarise(Salinity = mean(Salinity_PSS, na.rm = TRUE), .groups = "drop") %>%
+  left_join(crosswalk %>% filter(source == "salbia"), by = c("Station_Name" = "sensor_name"))
+
+daily_wgr <- sensors_wgr %>%
+  mutate(date = as.Date(datetime)) %>%
+  group_by(Station_Name, date) %>%
+  summarise(Salinity = mean(Salinity, na.rm = TRUE), .groups = "drop") %>%
+  left_join(crosswalk %>% filter(source == "wgr"), by = c("Station_Name" = "sensor_name"))
+
+daily_salbia$source <- "sensor salbia"
+daily_wgr$source <- "sensor wgr"
+daily_sensors <- bind_rows(daily_salbia, daily_wgr) %>%
+  filter(!is.na(site_id)) %>%
+  left_join(site_coords, by = "site_id") %>%
+  select(site_id, date, latitude, longitude, Salinity, source)
+
+
+insitu <- insitu %>% mutate(date = as.Date(date))  # adjust if needed
+insitu$source <- "grab samples"
+
+
+# ── load in situ sensor data ────────────────────────────────────
+long_sensors <- read.csv(
+  file.path(path_repo_root, "data/in_situ/longitudinal_sensors_clean.csv")
+  )
+long_sensors$site_id <- paste0("longitudinal",long_sensors$X)
+long_sensors$datetime <- ymd_hms(long_sensors$datetime_15min, tz = "UTC")
+long_sensors$date <- as.Date(long_sensors$date)
+long_sensors$source <- "longit_transects"
+
+
+# ── combine all in situ data sources into one ────────────────────────────────────
+
+
+combined <- bind_rows(insitu, daily_sensors, long_sensors)
+length(unique(combined$date))
+dim(combined)
+
+
+
+
+ggplot(combined[combined$site_id %in% c("S01","S02","S04","S05","S06","S09","S010") & combined$date>"2023-01-01",], 
+       aes(date, Salinity, colour = source))+
+  geom_point()+theme_bw()+facet_wrap(site_id~., scales = "free_y")
+
+
+# plot(table(combined$date))
+
+
+# 
+# 
+# S01    597  Tendaba
+# S02    537
+# S04    254  Wali Kunda
+# S05    404  Kauur
+# S06    294  Kuntaur
+# S07    174
+# S09      0  Basse
+# S10    676
+
+idsel <- 597
+datestart <- as.Date("2015-01-01")
+
+RS_one_station <- dataLS[dataLS$date>datestart & dataLS$seg_id >= idsel-2 & dataLS$seg_id <= idsel+2,c(1:10)]
+
+head(RS_one_station)
+summary(RS_one_station)
+unique(RS_one_station$sensor)
+
+
+# temporal alignment to S2 data
+
+
+
+
+smoothedRS <- smooth.spline(x = decimal_date(RS_one_station$date), 
+                            y = RS_one_station$green, 
+                            spar = 0.2)
+
+smoothedRS_df <- data.frame(date = smoothedRS$x,
+                            Rrs = smoothedRS$y)
+
+
+ggplot(RS_one_station, aes(decimal_date(date), green))+
+  geom_path(data = smoothedRS_df, aes(date, Rrs), linewidth = 2)+
+  geom_point(aes(colour = sensor))+theme_bw()
+
+
+
+insitu_one_station <- insitu_daily_sf[insitu_daily_sf$seg_id==idsel,]
+clean_insitu <- data.frame(date = insitu_one_station$date,
+                           Salinity = insitu_one_station$Salinity)
+clean_insitu$decdate <- decimal_date(clean_insitu$date)
+clean_insitu <- clean_insitu[order(clean_insitu$decdate),]
+
+
+clean_insitu$Rrs <- approx(x = smoothedRS_df$date, smoothedRS_df$Rrs, xout = clean_insitu$decdate,
+                          method = "linear", )$y
+
+ggplot(clean_insitu, aes(Rrs, Salinity, colour = year(date)))+geom_point()
+
+ggplot(clean_insitu, aes(date, Salinity, colour = year(date)))+geom_point()
+ggplot(clean_insitu, aes(date, Rrs, colour = year(date)))+geom_point()
+
+
 
 # ── build in-situ sf in UTM 28N ────────────────────────────────────────
-insitu_sf <- st_as_sf(insitu,
+insitu_sf <- st_as_sf(combined,
                       coords = c("longitude", "latitude"),
                       crs    = 4326) |>
   st_transform(32628)
@@ -155,6 +343,7 @@ cat("In-situ points retained after spatial filter:",
     nrow(insitu_safe), "/", nrow(insitu_joined), "\n")
 
 
+
 # ── diagnostic map ─────────────────────────────────────────────────────
 ggplot() +
   geom_sf(data = river_segs, fill = "lightblue", color = "steelblue",
@@ -168,11 +357,164 @@ ggplot() +
   theme_bw()
 
 
+ggplot(insitu_safe, aes(seg_id, Salinity, colour = source))+geom_point()
+
+
+
+
+# Identify numeric columns to average (excluding coordinates and IDs)
+cols_to_avg <- insitu_safe %>%
+  st_drop_geometry() %>%
+  select(where(is.numeric)) %>%
+  select(-any_of(c("X", "River_branches", "seg_id", "dist_start_km", "dist_end_km", 
+                   "dist_to_seg_m", "gap_before_min", "gap_after_min"))) %>%
+  names()
+
+# Daily average per seg_id
+insitu_daily <- insitu_safe %>%
+  st_drop_geometry() %>%
+  mutate(
+    # Use original date column; fall back to datetime for sensor rows
+    date_grp = as.Date(coalesce(
+      as.character(date),
+      as.character(as.Date(datetime, tz = "UTC"))
+    ))
+  ) %>%
+  group_by(seg_id, date_grp) %>%
+  summarise(
+    across(all_of(cols_to_avg), ~mean(.x, na.rm = TRUE)),
+    site_id       = first(site_id),
+    site_name     = first(site_name),
+    dist_to_seg_m = first(dist_to_seg_m),
+    source        = first(source),
+    Season        = first(Season),
+    dist_start_km = first(dist_start_km),
+    dist_end_km   = first(dist_end_km),
+    n_obs         = n(),
+    .groups = "drop"
+  ) %>%
+  rename(date = date_grp)
+
+# Compute centroid geometry per seg_id × date
+# Using the same date logic as insitu_daily
+geom_daily <- insitu_safe %>%
+  mutate(
+    date_grp = as.Date(coalesce(
+      as.character(date),
+      as.character(as.Date(datetime, tz = "UTC"))
+    ))
+  ) %>%
+  group_by(seg_id, date_grp) %>%
+  summarise(geometry = st_union(geometry), .groups = "drop") %>%
+  mutate(geometry = st_centroid(geometry)) %>%
+  rename(date = date_grp)
+
+# Join averaged data back onto the geometry
+insitu_daily_sf <- geom_daily %>%
+  left_join(insitu_daily, by = c("seg_id", "date")) %>%
+  st_as_sf(crs = st_crs(insitu_safe))
+
+
+cat("Rows in insitu_daily:    ", nrow(insitu_daily), "\n")
+cat("Rows in insitu_daily_sf: ", nrow(insitu_daily_sf), "\n")
+
+# Check dates are now present
+cat("NA dates in sf object:", sum(is.na(insitu_daily_sf$date)), "\n")
+
+# Spot check
+insitu_daily_sf[insitu_daily_sf$date == "2024-08-01", c("seg_id", "date", "Salinity", "site_name")]
+
+
+
+# Check how many observations were collapsed per group
+insitu_daily_sf %>% 
+  st_drop_geometry() %>%
+  count(n_obs) %>% 
+  arrange(desc(n_obs))
+
+
+
+# Check how many rows have valid dates now
+cat("NA dates remaining:", sum(is.na(insitu_daily$date)), "\n")
+cat("Total daily rows:", nrow(insitu_daily), "\n")
+
+
+
+
+library(leaflet)
+
+# Extract coordinates from geometry into columns
+insitu_daily_sf <- st_transform(insitu_daily_sf, crs = 4326)
+insitu_daily_sf <- insitu_daily_sf %>%
+  mutate(
+    longitude = st_coordinates(.)[, 1],
+    latitude  = st_coordinates(.)[, 2]
+  )
+
+pal <- colorNumeric("viridis", reverse = FALSE, domain = insitu_daily_sf$Salinity, na.color = "transparent")
+
+leaflet(insitu_daily_sf) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addCircleMarkers(
+    lng         = ~longitude,
+    lat         = ~latitude,
+    color       = ~pal(Salinity),
+    radius      = 5,
+    stroke      = FALSE,
+    fillOpacity = 0.8,
+    popup = ~paste0(
+      "<b>", site_name, "</b><br>",
+      "<i>", date, "</i><br>",
+      "Salinity: ",     round(Salinity, 2),     " PSS<br>",
+      "Temperature: ",  round(Temperature, 2),  " °C<br>",
+      "Conductivity: ", round(Conductivity, 2), " µS/cm<br>",
+      "Source: ",       source, "<br>",
+      "N obs averaged: ", n_obs
+    )
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    pal      = pal,
+    values   = ~Salinity,
+    title    = "Salinity (PSS)",
+    opacity  = 0.8
+  )
+
+
+
+# Longitudinal view: where are the observations along the river?
+ggplot(insitu_daily_sf, aes(dist_start_km, Salinity,
+                            color = as.factor(month(date)))) +
+  geom_point(alpha = 0.7) +
+  scale_color_discrete(name = "Month") +
+  labs(title = "Salinity observations along river profile",
+       x = "Distance from upstream (km)", y = "Salinity (PSU)") +
+  theme_bw()+facet_wrap(source~.)
+
+ggplot(insitu_daily_sf, aes(dist_start_km, TSS,
+                            color = as.factor(year(date)))) +
+  geom_point(alpha = 0.7) +
+  scale_color_discrete(name = "Month") +
+  labs(title = "TSS observations along river profile",
+       x = "Distance from upstream (km)", y = "TSS [mg/L]") +
+  theme_bw()
+
+
+ggplot(insitu_daily_sf, aes(dist_start_km, DO,
+                            color = year(date))) +
+  geom_point(alpha = 0.7) +
+  # scale_color_discrete(name = "Year") +
+  labs(title = "DO observations along river profile",
+       x = "Distance from upstream (km)", y = "DO [mg/L]") +
+  theme_bw()
+
+
+
 # ── TEMPORAL MATCH: join satellite obs on same seg_id within ±dt days ──
 
-dt_days_max <- 2   # tighten to 0 for same-day only, loosen to 3 if needed
+dt_days_max <- 0   # tighten to 0 for same-day only, loosen to 3 if needed
 
-insitu_dt <- as.data.table(st_drop_geometry(insitu_safe))
+insitu_dt <- as.data.table(st_drop_geometry(insitu_daily_sf))
 insitu_dt[, obs_id := .I]
 
 matchups <- dataLS[insitu_dt,
@@ -190,6 +532,7 @@ best_matchups <- matchups[
 ][, .SD[1], by = obs_id]
 
 cat("Unique in-situ observations matched:", nrow(best_matchups), "\n")
+
 
 
 
@@ -219,14 +562,24 @@ ggplot(best_matchups, aes(sensor)) +
   theme_bw()
 
 # 3. Core scatter: optical bands vs salinity
+
 ggplot(best_matchups,
-       aes(Salinity, nir, color = abs(dt_days))) +
+       aes(green, (Salinity), color = sensor)) +
   geom_point(alpha = 0.7) +
-  scale_color_viridis_c(name = "|Δt| days") +
-  geom_smooth(method = "lm", se = TRUE, color = "black") +
-  labs(title = "Red/Blue ratio vs Salinity",
-       x = "Salinity (PSU)", y = "Red/Blue ratio") +
-  theme_bw()#+facet_wrap(month(sat_date)~.)
+  # scale_color_viridis_d(name = "satellite") +
+  geom_smooth(method = "loess", se = TRUE, color = "black") +
+  # labs(title = "Red/Blue ratio vs Salinity",
+  #      x = "Salinity (PSU)", y = "Red/Blue ratio") +
+  theme_bw()+facet_wrap(source~.)
+
+ggplot(best_matchups,
+       aes(swir1/red, (Salinity), color = sensor)) +
+  geom_point(alpha = 0.7) +
+  # scale_color_viridis_d(name = "satellite") +
+  geom_smooth(method = "loess", se = TRUE, color = "black") +
+  # labs(title = "Red/Blue ratio vs Salinity",
+  #      x = "Salinity (PSU)", y = "Red/Blue ratio") +
+  theme_bw()+facet_wrap(source~.)
 
 ggplot(best_matchups,
        aes(nir/swir2, Salinity, color = abs(dt_days))) +
@@ -255,28 +608,20 @@ insitu_vars <- insitu_vars[insitu_vars %in% names(best_matchups)]
 best_matchups_long <- melt(
   best_matchups,
   id.vars     = c("obs_id", "seg_id", "dist_start_km", "rb_ratio",
-                  "sensor", "dt_days", "dist_to_seg_m"),
+                  "source", "dt_days", "dist_to_seg_m"),
   measure.vars = insitu_vars,
   variable.name = "variable",
   value.name    = "insitu_value"
 )
 
 ggplot(best_matchups_long[!is.na(insitu_value)],
-       aes(insitu_value, rb_ratio, color = sensor)) +
+       aes(insitu_value, rb_ratio, color = source)) +
   geom_point(alpha = 0.6, size = 1.2) +
   geom_smooth(method = "lm", se = TRUE, color = "black") +
   facet_wrap(~ variable, scales = "free_x") +
   labs(x = "In-situ value", y = "Red/Blue ratio") +
   theme_bw()
 
-# 5. Longitudinal view: where are the matchups along the river?
-ggplot(best_matchups, aes(dist_start_km, Salinity,
-                          color = as.factor(month(insitu_date)))) +
-  geom_point(alpha = 0.7) +
-  scale_color_discrete(name = "Month") +
-  labs(title = "Salinity matchups along river profile",
-       x = "Distance from upstream (km)", y = "Salinity (PSU)") +
-  theme_bw()
 
 
 # ── EXPORT 
