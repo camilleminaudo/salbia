@@ -29,6 +29,7 @@ dataLS <- fread(file.path(datapath, "salbia_reflectance_aligned_normalized.csv")
 dataLS[, date := as.Date(date)]
 dataLS[, rb_ratio := fifelse(blue > 0.001, red / blue, NA_real_)]
 dataLS[, nirswir2_ratio := fifelse(swir2 > 0.001, nir / swir2, NA_real_)]
+dataLS[, nirswir1_ratio := fifelse(swir1 > 0.001, nir / swir1, NA_real_)]
 dataLS[, swir2nir_ratio := fifelse(nir > 0.001, swir2 / nir, NA_real_)]
 
 # River segments shapefile — polygon or line, one row per seg_id
@@ -124,6 +125,10 @@ sensors_salbia <- read.csv(
   na.strings = c("", "NA", "N/A", "nd", "ND", "-", " ", "#VALUE!")  # catch all common NA codes
 )
 sensors_salbia$datetime <- ymd_hms(sensors_salbia$Date_GMT, tz = "UTC")
+
+# take data from Kemoto out
+sensors_salbia <- sensors_salbia[which(sensors_salbia$Station != "S10"),]
+
 
 
 sensors_wgr <- read.csv(
@@ -227,49 +232,45 @@ ggplot(combined[combined$site_id %in% c("S01","S02","S04","S05","S06","S09","S01
 # S09      0  Basse
 # S10    676
 
-idsel <- 597
-datestart <- as.Date("2015-01-01")
-
-RS_one_station <- dataLS[dataLS$date>datestart & dataLS$seg_id >= idsel-2 & dataLS$seg_id <= idsel+2,c(1:10)]
-
-head(RS_one_station)
-summary(RS_one_station)
-unique(RS_one_station$sensor)
-
-
-# temporal alignment to S2 data
-
-
-
-
-smoothedRS <- smooth.spline(x = decimal_date(RS_one_station$date), 
-                            y = RS_one_station$green, 
-                            spar = 0.2)
-
-smoothedRS_df <- data.frame(date = smoothedRS$x,
-                            Rrs = smoothedRS$y)
-
-
-ggplot(RS_one_station, aes(decimal_date(date), green))+
-  geom_path(data = smoothedRS_df, aes(date, Rrs), linewidth = 2)+
-  geom_point(aes(colour = sensor))+theme_bw()
-
-
-
-insitu_one_station <- insitu_daily_sf[insitu_daily_sf$seg_id==idsel,]
-clean_insitu <- data.frame(date = insitu_one_station$date,
-                           Salinity = insitu_one_station$Salinity)
-clean_insitu$decdate <- decimal_date(clean_insitu$date)
-clean_insitu <- clean_insitu[order(clean_insitu$decdate),]
-
-
-clean_insitu$Rrs <- approx(x = smoothedRS_df$date, smoothedRS_df$Rrs, xout = clean_insitu$decdate,
-                          method = "linear", )$y
-
-ggplot(clean_insitu, aes(Rrs, Salinity, colour = year(date)))+geom_point()
-
-ggplot(clean_insitu, aes(date, Salinity, colour = year(date)))+geom_point()
-ggplot(clean_insitu, aes(date, Rrs, colour = year(date)))+geom_point()
+# idsel <- 597
+# datestart <- as.Date("2015-01-01")
+# 
+# RS_one_station <- dataLS[dataLS$date>datestart & dataLS$seg_id >= idsel-2 & dataLS$seg_id <= idsel+2,c(1:10)]
+# 
+# head(RS_one_station)
+# summary(RS_one_station)
+# unique(RS_one_station$sensor)
+# 
+# 
+# 
+# smoothedRS <- smooth.spline(x = decimal_date(RS_one_station$date), 
+#                             y = RS_one_station$green, 
+#                             spar = 0.2)
+# 
+# smoothedRS_df <- data.frame(date = smoothedRS$x,
+#                             Rrs = smoothedRS$y)
+# 
+# 
+# ggplot(RS_one_station, aes(decimal_date(date), green))+
+#   geom_path(data = smoothedRS_df, aes(date, Rrs), linewidth = 2)+
+#   geom_point(aes(colour = sensor))+theme_bw()
+# 
+# 
+# 
+# insitu_one_station <- insitu_daily_sf[insitu_daily_sf$seg_id==idsel,]
+# clean_insitu <- data.frame(date = insitu_one_station$date,
+#                            Salinity = insitu_one_station$Salinity)
+# clean_insitu$decdate <- decimal_date(clean_insitu$date)
+# clean_insitu <- clean_insitu[order(clean_insitu$decdate),]
+# 
+# 
+# clean_insitu$Rrs <- approx(x = smoothedRS_df$date, smoothedRS_df$Rrs, xout = clean_insitu$decdate,
+#                           method = "linear", )$y
+# 
+# ggplot(clean_insitu, aes(Rrs, Salinity, colour = year(date)))+geom_point()
+# 
+# ggplot(clean_insitu, aes(date, Salinity, colour = year(date)))+geom_point()
+# ggplot(clean_insitu, aes(date, Rrs, colour = year(date)))+geom_point()
 
 
 
@@ -280,8 +281,8 @@ insitu_sf <- st_as_sf(combined,
   st_transform(32628)
 
 # write shp file
-# st_write(insitu_sf, 
-#          paste0(dirname(gispath), "/", "salbia_in_situ.gpkg"))
+st_write(insitu_sf,
+         paste0(dirname(gispath), "/", "salbia_in_situ.gpkg"), append = F)
 
 
 
@@ -510,6 +511,270 @@ ggplot(insitu_daily_sf, aes(dist_start_km, DO,
 
 
 
+
+
+
+
+
+
+
+
+
+
+library(ggplot2)
+library(dplyr)
+library(sf)
+library(patchwork)
+library(scales)
+library(ggspatial)
+library(lubridate)
+
+# ── Prep ──────────────────────────────────────────────────────────────────────
+
+
+theme_pub <- function() {
+  theme_minimal(base_size = 11, base_family = "sans") +
+    theme(
+      plot.title        = element_text(face = "bold", size = 13, margin = margin(b = 4)),
+      plot.subtitle     = element_text(colour = "grey40", size = 9, margin = margin(b = 8)),
+      axis.title        = element_text(size = 9, colour = "grey30"),
+      axis.text         = element_text(size = 8, colour = "grey40"),
+      panel.grid.major  = element_line(colour = "grey92", linewidth = 0.4),
+      panel.grid.minor  = element_blank(),
+      legend.title      = element_text(size = 8, face = "bold"),
+      legend.text       = element_text(size = 8),
+      legend.key.size   = unit(0.8, "lines"),
+      strip.text        = element_text(face = "bold", size = 9),
+      plot.caption      = element_text(colour = "grey55", size = 7, margin = margin(t = 6)),
+      plot.margin       = margin(8, 10, 8, 8)
+    )
+}
+
+
+insitu_plot <- insitu_daily_sf %>%
+  filter(!is.na(Salinity)) %>%
+  mutate(
+    source = case_when(
+      grepl("sensor|Sensor|continuous", source, ignore.case = TRUE) ~ "Continuous sensor",
+      grepl("longit", source, ignore.case = TRUE) ~ "Longitudinal survey",
+      grepl("grab|Grab|discrete", source, ignore.case = TRUE)       ~ "Grab sample",
+      TRUE                                                           ~ source
+    )
+  )
+
+source_pal <- c(
+  "Continuous sensor"   = "#2c6e8a",   # deep teal blue
+  "Longitudinal survey" = "#c77dff",   # soft violet — distinct from both others
+  "Grab sample"         = "#e76f51"    # warm coral-orange
+)
+
+# ── Figure 1: Map of observation locations ────────────────────────────────────
+
+# Summarise to one point per site (avoid overplotting)
+site_summary <- insitu_plot %>%
+  group_by(site_id, site_name, source) %>%
+  summarise(
+    n_obs       = n(),
+    Sal_mean    = mean(Salinity, na.rm = TRUE),
+    geometry    = st_union(geometry) %>% st_centroid(),
+    .groups     = "drop"
+  ) %>%
+  st_as_sf()
+
+bbox_insitu <- st_bbox(site_summary %>% st_buffer(10000))
+
+p_map <- ggplot(site_summary) +
+  annotation_map_tile(type = "hotstyle", zoom = 9, quiet = TRUE) +
+  geom_sf(aes(colour = source, size = n_obs),
+          alpha = 0.85, stroke = 0.5) +
+  geom_sf_label(
+    aes(label = site_name),
+    size          = 2.5,
+    nudge_y       = 0.06,
+    label.padding = unit(0.12, "lines"),
+    label.size    = 0,
+    fill          = alpha("white", 0.7),
+    colour        = "grey20"
+  ) +
+  scale_colour_manual(values = source_pal, name = "Source") +
+  scale_size_continuous(
+    name   = "N observations",
+    range  = c(2, 8),
+    breaks = c(10, 50, 200, 500)
+  ) +
+  annotation_scale(location = "bl", width_hint = 0.2, text_cex = 0.7) +
+  annotation_north_arrow(
+    location = "bl", pad_y = unit(0.5, "cm"),
+    style = north_arrow_minimal(text_size = 8)
+  ) +
+  coord_sf(
+    xlim = c(bbox_insitu["xmin"], bbox_insitu["xmax"]),
+    ylim = c(bbox_insitu["ymin"], bbox_insitu["ymax"])
+  ) +
+  labs(
+    title    = "In situ salinity observation network",
+    subtitle = "Gambia River — all stations with salinity data",
+    x = NULL, y = NULL,
+    caption  = "Basemap © CartoDB | Point size proportional to number of observations"
+  ) +
+  theme_pub() +
+  theme(
+    panel.grid.major = element_line(colour = "grey88", linewidth = 0.3),
+    axis.text        = element_text(size = 7)
+  )
+
+# ── Figure 2: Longitudinal salinity profile ───────────────────────────────────
+
+
+
+# Use dist_start_km as distance from Basse; distance from ocean = 415.6 - dist
+longit_sal <- insitu_plot %>%
+  st_drop_geometry() %>%
+  filter(!is.na(Salinity), !is.na(dist_start_km)) %>%
+  filter(month(date)>=5, month(date)<=9) %>%
+  mutate(d_from_ocean = 415.6 - dist_start_km)
+
+# Summary ribbon per source × distance bin (5 km)
+longit_summary <- longit_sal %>%
+  mutate(dist_bin = round(d_from_ocean / 5) * 5) %>%
+  group_by(source, dist_bin) %>%
+  summarise(
+    Sal_median = median(Salinity, na.rm = TRUE),
+    Sal_q25    = quantile(Salinity, 0.25, na.rm = TRUE),
+    Sal_q75    = quantile(Salinity, 0.75, na.rm = TRUE),
+    Sal_min    = quantile(Salinity, 0.05, na.rm = TRUE),
+    Sal_max    = quantile(Salinity, 0.95, na.rm = TRUE),
+    n          = n(),
+    .groups    = "drop"
+  ) %>%
+  filter(n >= 3)
+
+p_longit <- ggplot(longit_summary, aes(x = dist_bin, colour = source, fill = source)) +
+  
+  # 5–95% range
+  geom_ribbon(aes(ymin = Sal_min, ymax = Sal_max), alpha = 0.12, colour = NA) +
+  
+  # IQR
+  geom_ribbon(aes(ymin = Sal_q25, ymax = Sal_q75), alpha = 0.25, colour = NA) +
+  
+  # Median line
+  geom_line(aes(y = Sal_median), linewidth = 0.9) +
+  
+  scale_colour_manual(values = source_pal, name = "Source") +
+  scale_fill_manual(values   = source_pal, name = "Source") +
+  scale_x_continuous(
+    breaks    = seq(0, 400, 50),
+    # trans     = "reverse",
+    expand    = c(0.01, 0),
+    sec.axis  = sec_axis(~415.6 - ., name = "Distance from Basse [km]",
+                         breaks = seq(0, 400, 50))
+  ) +
+  scale_y_continuous(expand = c(0.02, 0)) +
+  labs(
+    title    = "Longitudinal salinity profile",
+    subtitle = "Median ± IQR (shaded) and 5–95th percentile range",
+    x        = "Distance from ocean [km]",
+    y        = "Salinity [PSS]",
+    caption  = "5 km distance bins | minimum 3 observations per bin"
+  ) +
+  theme_pub() +
+  theme(legend.position = "bottom")
+
+# ── Figure 3: Time series for fixed sensor stations ───────────────────────────
+
+sensor_sites <- insitu_plot %>%
+  st_drop_geometry() %>%
+  filter(source == "Continuous sensor", !is.na(Salinity)) %>%
+  group_by(site_id) %>%
+  filter(n() >= 30) %>%       # only sites with enough data
+  ungroup()
+
+# Order sites from ocean to headwaters
+site_order <- sensor_sites %>%
+  group_by(site_id, site_name) %>%
+  summarise(d = 415.6 - mean(dist_start_km, na.rm = TRUE), .groups = "drop") %>%
+  arrange(d) %>%
+  mutate(site_label = paste0(site_id, "\n(", round(d), " km from ocean)"))
+
+sensor_sites <- sensor_sites %>%
+  left_join(site_order %>% select(site_id, site_label, d), by = "site_id") %>%
+  mutate(site_label = factor(site_label, levels = site_order$site_label))
+
+p_ts <- ggplot(sensor_sites, aes(x = date, y = Salinity)) +
+  
+  geom_line(colour = source_pal["Continuous sensor"],
+            linewidth = 0.4, alpha = 0.6) +
+  geom_point(colour = source_pal["Continuous sensor"],
+             size = 0.6, alpha = 0.5) +
+  
+  # Annual smoothed trend
+  # geom_smooth(method = "loess", span = 0.15,
+  #             colour    = "grey20",
+  #             fill      = "grey70",
+  #             linewidth = 0.8,
+  #             alpha     = 0.3,
+  #             se        = TRUE) +
+  
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y",
+               expand = c(0.01, 0)) +
+  scale_y_log10()+
+  # scale_y_continuous(expand = c(0.02, 0)) +
+  
+  facet_wrap(~ site_label, ncol = 3) +
+  
+  labs(
+    title    = "Salinity time series — continuous sensor stations",
+    subtitle = "Daily observations with LOESS trend (grey ribbon = 95% CI)",
+    x        = NULL,
+    y        = "Salinity [PSS]",
+    caption  = "Sites ordered from ocean (top-left) to headwaters (bottom-right)"
+  ) +
+  theme_pub() +
+  theme(
+    axis.text.x  = element_text(angle = 45, hjust = 1, size = 7),
+    strip.text   = element_text(size = 8)
+  )
+
+# ── Save ──────────────────────────────────────────────────────────────────────
+
+ggsave(file.path(plotpath, "insitu_salinity_map.jpg"),
+       p_map,   width = 9,  height = 6,  dpi = 300)
+
+ggsave(file.path(plotpath, "insitu_salinity_longitudinal.jpg"),
+       p_longit, width = 10, height = 4.5, dpi = 300)
+
+ggsave(file.path(plotpath, "insitu_salinity_timeseries.jpg"),
+       p_ts,    width = 11, height = ceiling(n_distinct(sensor_sites$site_id) / 2) * 2.5,
+       dpi = 300)
+
+# ── Combined panel (for poster/talk) ─────────────────────────────────────────
+
+p_combined <- (p_map | p_longit) / p_ts +
+  plot_layout(heights = c(1, 1.2)) +
+  plot_annotation(
+    title    = "Gambia River — In Situ Salinity Database",
+    subtitle = paste0(
+      format(min(insitu_plot$date, na.rm = TRUE), "%Y"), "–",
+      format(max(insitu_plot$date, na.rm = TRUE), "%Y"),
+      " | ", comma(nrow(insitu_plot)), " station-days | ",
+      n_distinct(insitu_plot$site_id), " sites"
+    ),
+    theme = theme(
+      plot.title    = element_text(face = "bold", size = 15),
+      plot.subtitle = element_text(colour = "grey40", size = 10)
+    )
+  )
+
+ggsave(file.path(plotpath, "insitu_salinity_overview.jpg"),
+       p_combined, width = 14, height = 12, dpi = 300)
+
+
+
+
+
+
+
+
 # ── TEMPORAL MATCH: join satellite obs on same seg_id within ±dt days ──
 
 dt_days_max <- 0   # tighten to 0 for same-day only, loosen to 3 if needed
@@ -564,13 +829,64 @@ ggplot(best_matchups, aes(sensor)) +
 # 3. Core scatter: optical bands vs salinity
 
 ggplot(best_matchups,
-       aes(green, (Salinity), color = sensor)) +
+       aes(green, Salinity, color = sensor)) +
+  geom_point(alpha = 0.7) +
+  # scale_color_viridis_d(name = "satellite") +
+  geom_smooth(method = "loess", se = TRUE, color = "black") +
+  labs(title = "Salinity vs Green band",
+       x = "Green band reflectance (dl)",
+       y = "Salinity (PSU)") +
+  theme_bw()+facet_wrap(source~.)
+
+
+best_matchups$site_id2 <- best_matchups$site_id
+list_not_longit <- c("S01","S02","S03","S04","S05","S06","S07","S08","S09","S10")
+
+best_matchups$site_id2[! best_matchups$site_id %in% list_not_longit] <- "longitudinal"
+
+ggplot(best_matchups,
+       aes(green, Salinity, color = source)) +
+  geom_point(alpha = 0.7) +
+  # scale_color_viridis_d(name = "satellite") +
+  geom_smooth(aes(group = source, fill = source), method = "loess", se = TRUE, color = "black") +
+  labs(title = "Salinity vs Green band",
+       x = "Green band reflectance (dl)",
+       y = "Salinity (PSU)") +
+  theme_bw()+facet_wrap(site_id2~.)
+
+
+
+
+
+
+
+# ── identify dates with multiple in-situ salinity observations ─────────
+dates_multi <- best_matchups[
+  !is.na(Salinity),
+  .(n_sal = .N),
+  by = insitu_date
+][n_sal > 6, insitu_date]
+
+cat("Dates with >5 salinity observation:", length(dates_multi), "\n")
+
+
+
+# best_matchups <- best_matchups[which(best_matchups$source == "grab samples" | best_matchups$source == "longit_transects"),]
+
+best_matchups <- best_matchups[best_matchups$insitu_date %in% dates_multi,]
+
+
+
+ggplot(best_matchups,
+       aes(green, (Salinity), color = source)) +
   geom_point(alpha = 0.7) +
   # scale_color_viridis_d(name = "satellite") +
   geom_smooth(method = "loess", se = TRUE, color = "black") +
   # labs(title = "Red/Blue ratio vs Salinity",
   #      x = "Salinity (PSU)", y = "Red/Blue ratio") +
-  theme_bw()+facet_wrap(source~.)
+  theme_bw()
+
+
 
 ggplot(best_matchups,
        aes(swir1/red, (Salinity), color = sensor)) +
@@ -582,16 +898,16 @@ ggplot(best_matchups,
   theme_bw()+facet_wrap(source~.)
 
 ggplot(best_matchups,
-       aes(nir/swir2, Salinity, color = abs(dt_days))) +
+       aes(swir1/nir, Salinity, color = source)) +
   geom_point(alpha = 0.7) +
-  scale_color_viridis_c(name = "|Δt| days") +
+  scale_color_viridis_d() +
   geom_smooth(method = "loess", se = TRUE, color = "black") +
-  labs(title = "Salinity vs NIR / SWIR2 ratio",
-       y = "Salinity (PSU)", x = "NIR / SWIR2 ratio") +
+  # labs(title = "Salinity vs NIR / SWIR2 ratio",
+  #      y = "Salinity (PSU)", x = "NIR / SWIR2 ratio") +
   theme_bw()
 
 ggplot(best_matchups,
-       aes(TSS, green, color = abs(dt_days))) +
+       aes(TSS, red/blue, color = abs(dt_days))) +
   geom_point(alpha = 0.7) +
   scale_color_viridis_c(name = "|Δt| days") +
   geom_smooth(method = "lm", se = TRUE, color = "black") +
@@ -607,7 +923,7 @@ insitu_vars <- insitu_vars[insitu_vars %in% names(best_matchups)]
 
 best_matchups_long <- melt(
   best_matchups,
-  id.vars     = c("obs_id", "seg_id", "dist_start_km", "rb_ratio",
+  id.vars     = c("obs_id", "seg_id", "dist_start_km", "green","nir","swir1",
                   "source", "dt_days", "dist_to_seg_m"),
   measure.vars = insitu_vars,
   variable.name = "variable",
@@ -615,11 +931,11 @@ best_matchups_long <- melt(
 )
 
 ggplot(best_matchups_long[!is.na(insitu_value)],
-       aes(insitu_value, rb_ratio, color = source)) +
+       aes(insitu_value, nir/swir1, color = source)) +
   geom_point(alpha = 0.6, size = 1.2) +
-  geom_smooth(method = "lm", se = TRUE, color = "black") +
+  geom_smooth(method = "loess", se = TRUE, color = "black") +
   facet_wrap(~ variable, scales = "free_x") +
-  labs(x = "In-situ value", y = "Red/Blue ratio") +
+  labs(x = "In-situ value", y = "Green band") +
   theme_bw()
 
 
@@ -636,38 +952,31 @@ cat("Saved", nrow(best_matchups), "matchups.\n")
 
 library(patchwork)
 
-# ── identify dates with multiple in-situ salinity observations ─────────
-dates_multi <- best_matchups[
-  !is.na(Salinity),
-  .(n_sal = .N),
-  by = insitu_date
-][n_sal > 5, insitu_date]
-
-cat("Dates with >5 salinity observation:", length(dates_multi), "\n")
-
 
 # ── full satellite longitudinal profiles for matchup dates ─────────────
 # Pull from the full aligned dataset, not from best_matchups
-rb_full <- dataLS[
+
+
+RS_full <- dataLS[
   date %in% dates_multi,   # filter to matchup dates
-  .(rb_ratio = mean(rb_ratio, na.rm = TRUE),
+  .(nirswir1_ratio  = mean(nirswir1_ratio , na.rm = TRUE),
     sensor   = first(sensor)),
   by = .(date, d_from_basse, seg_id)
 ]
-setnames(rb_full, "date", "insitu_date")
-setnames(rb_full, "d_from_basse", "dist_start_km")
+setnames(RS_full, "date", "insitu_date")
+setnames(RS_full, "d_from_basse", "dist_start_km")
 
 
 # ── plot function for a single date ────────────────────────────────────
 plot_date <- function(d) {
   dat_sal <- best_matchups[insitu_date == d & !is.na(Salinity)]
-  dat_rb  <- rb_full[insitu_date == d & !is.na(rb_ratio)]
+  dat_rb  <- RS_full[insitu_date == d & !is.na(nirswir1_ratio )]
   
   # shared x range across both panels
   x_range <- range(c(dat_sal$dist_start_km, dat_rb$dist_start_km),
                    na.rm = TRUE)
   
-  p_sal <- ggplot(dat_sal, aes(dist_start_km, Salinity)) +
+  p_sal <- ggplot(dat_sal, aes(417-dist_start_km, Salinity)) +
     geom_point(aes(color = as.factor(abs(dt_days))),
                size = 2.5, alpha = 0.8) +
     geom_line(alpha = 0.4) +
@@ -683,7 +992,7 @@ plot_date <- function(d) {
           axis.ticks.x = element_blank(),
           plot.title   = element_text(size = 10))
   
-  p_rb <- ggplot(dat_rb, aes(dist_start_km, rb_ratio)) +
+  p_rb <- ggplot(dat_rb, aes(417-dist_start_km, nirswir1_ratio )) +
     geom_point(aes(color = sensor), size = 1, alpha = 0.5) +
     geom_line(aes(color = sensor, group = sensor), alpha = 0.6) +
     annotate("rect",
@@ -694,8 +1003,8 @@ plot_date <- function(d) {
     scale_color_brewer(palette = "Set1", name = "Sensor") +
     coord_cartesian(xlim = x_range) +
     labs(
-      x = "Distance from upstream (km)",
-      y = "Red / Blue"
+      x = "Distance from ocean (km)",
+      y = "nir / swir1"
     ) +
     theme_bw()
   
@@ -712,7 +1021,7 @@ for (d in sort(dates_multi)) {
   
   ggsave(
     filename = file.path(plotpath,
-                         paste0("matchup_", format(d, "%Y%m%d"), ".pdf")),
+                         paste0("matchups/matchup_", format(d, "%Y%m%d"), ".jpeg")),
     plot   = p,
     width  = 8,
     height = 5
@@ -733,7 +1042,7 @@ sal_ranges <- sal_all[, .(xmin = min(dist_start_km, na.rm = TRUE),
                       by = insitu_date]
 
 p_sal_all <- ggplot(sal_all,
-                    aes(dist_start_km, Salinity)) +
+                    aes(417-dist_start_km, Salinity, colour = source)) +
   geom_point(size = 1.2, alpha = 0.99) +
   geom_line(aes(group = insitu_date), alpha = 0.3) +
   # scale_color_brewer(palette = "OrRd", name = "|Δt| days") +
@@ -744,8 +1053,8 @@ p_sal_all <- ggplot(sal_all,
   theme(axis.text.x  = element_blank(),
         axis.ticks.x = element_blank())
 
-p_rb_all <- ggplot(rb_full,
-                   aes(dist_start_km, rb_ratio, color = sensor)) +
+p_rb_all <- ggplot(RS_full,
+                   aes(417-dist_start_km, nirswir1_ratio , color = sensor)) +
   geom_point(size = 1, alpha = 0.7) +
   geom_line(aes(group = interaction(insitu_date, sensor)), alpha = 0.3) +
   # shaded band showing in-situ sampling range per facet
@@ -756,14 +1065,14 @@ p_rb_all <- ggplot(rb_full,
   scale_color_brewer(palette = "Set1", name = "Sensor") +
   coord_cartesian(xlim = x_range_all) +
   facet_grid(~ insitu_date, labeller = label_both) +
-  labs(x = "Distance from upstream (km)", y = "Red / Blue") +
+  labs(x = "Distance from ocean (km)", y = "nir / swir1") +
   theme_bw(base_size = 8)
 
 p_overview <- p_sal_all / p_rb_all +
   plot_layout(heights = c(1.5, 1), guides = "collect")
 
 ggsave(
-  filename = file.path(plotpath, "matchup_all_dates_overview.pdf"),
+  filename = file.path(plotpath, "matchups/matchup_all_dates_overview.jpeg"),
   plot     = p_overview,
   width    = 14,
   height   = 10
@@ -940,7 +1249,7 @@ for (yvar in insitu_vars) {
   print(p)
   ggsave(
     filename = file.path(plotpath,
-                         paste0("feature_screen_", yvar, ".pdf")),
+                         paste0("matchups/feature_screen_", yvar, ".jpeg")),
     plot  = p,
     width = 12,
     height = 8
@@ -987,17 +1296,14 @@ ggplot(screen_sensor,
   theme(axis.text.x = element_text(angle = 45, hjust = 1),
         strip.text  = element_text(size = 6))
 
-ggsave(file.path(plotpath, "feature_screen_by_sensor.pdf"),
-       width = 16, height = 8)
+# ggsave(file.path(plotpath, "matchups/feature_screen_by_sensor.pdf"),
+#        width = 16, height = 8)
 
 
 # ── 6. EXPORT SCREENING TABLE ──────────────────────────────────────────
 fwrite(screen[order(insitu_var, -abs_r_spearman)],
        file.path(datapath, "feature_screening_correlations.csv"))
 cat("Screening table saved.\n")
-
-
-
 
 
 
@@ -1033,12 +1339,72 @@ fit_models <- function(x, y) {
     
     power = lm(log_y ~ log_x, data = df),   # log(y) ~ log(x)
     
-    exponential = lm(log_y ~ x, data = df), # log(y) ~ x
+    exponential = lm(log_y ~ x, data = df), # log(y) ~ x  (no offset/floor)
     
     log_linear = lm(y ~ log_x, data = df),  # y ~ log(x)
     
     gam = gam(y ~ s(x, k = 10), data = df, method = "REML")
   )
+  
+  # ── NEW: true nonlinear models fit with nls() ─────────────────────────
+  # These are added because several candidate relationships (exponential
+  # decay with a non-zero floor, hyperbolic/rational decay, and sigmoidal
+  # decay) cannot be captured by log-linearization — they need genuine
+  # nonlinear least squares with sensible starting values and, for
+  # stability, lower/upper bounds via algorithm = "port".
+  
+  rng_y <- diff(range(y))
+  rng_x <- diff(range(x))
+  
+  # 1. Exponential decay with floor:  y = a * exp(-b*x) + c
+  models$exp_decay_offset <- tryCatch(
+    nls(
+      y ~ a * exp(-b * x) + c,
+      data    = df,
+      start   = list(a = rng_y, b = 1 / mean(x), c = min(y)),
+      lower   = c(a = 0,     b = 0,     c = -abs(min(y))),
+      upper   = c(a = Inf,   b = Inf,   c = max(y)),
+      algorithm = "port",
+      control = nls.control(maxiter = 200, warnOnly = TRUE)
+    ),
+    error = function(e) { message("exp_decay_offset failed: ", e$message); NULL }
+  )
+  
+  # 2. Hyperbolic / rational decay:  y = a / (1 + b*x) + c
+  models$hyperbolic <- tryCatch(
+    nls(
+      y ~ a / (1 + b * x) + c,
+      data    = df,
+      start   = list(a = rng_y, b = 1 / mean(x), c = min(y)),
+      lower   = c(a = 0,     b = 0,     c = -abs(min(y))),
+      upper   = c(a = Inf,   b = Inf,   c = max(y)),
+      algorithm = "port",
+      control = nls.control(maxiter = 200, warnOnly = TRUE)
+    ),
+    error = function(e) { message("hyperbolic failed: ", e$message); NULL }
+  )
+  
+  # 3. Logistic (sigmoidal) decay, 4-parameter:
+  #    y = a + (d - a) / (1 + exp(b*(x - c)))
+  #    d = upper asymptote (low-x plateau), a = lower asymptote (high-x plateau)
+  #    c = inflection point, b = steepness (b > 0 for a decreasing curve)
+  models$logistic_decay <- tryCatch(
+    nls(
+      y ~ a + (d - a) / (1 + exp(b * (x - c))),
+      data    = df,
+      start   = list(a = min(y), d = max(y),
+                     b = 1 / max(rng_x, .Machine$double.eps),
+                     c = median(x)),
+      lower   = c(a = -abs(min(y)), d = 0,   b = 0,    c = min(x)),
+      upper   = c(a = max(y),       d = Inf, b = Inf,  c = max(x)),
+      algorithm = "port",
+      control = nls.control(maxiter = 200, warnOnly = TRUE)
+    ),
+    error = function(e) { message("logistic_decay failed: ", e$message); NULL }
+  )
+  
+  # drop any nonlinear fits that failed outright
+  models <- Filter(Negate(is.null), models)
   
   models
 }
@@ -1060,13 +1426,16 @@ extract_metrics <- function(models, x, y) {
     
     # Predictions on original y scale
     y_hat <- switch(mname,
-                    linear      = predict(mod, df),
-                    inverse     = predict(mod, df),
-                    poly2       = predict(mod, df),
-                    power       = exp(predict(mod, df)),
-                    exponential = exp(predict(mod, df)),
-                    log_linear  = predict(mod, df),
-                    gam         = predict(mod, df)
+                    linear            = predict(mod, df),
+                    inverse           = predict(mod, df),
+                    poly2             = predict(mod, df),
+                    power             = exp(predict(mod, df)),
+                    exponential       = exp(predict(mod, df)),
+                    log_linear        = predict(mod, df),
+                    gam               = predict(mod, df),
+                    exp_decay_offset  = predict(mod, df),  # nls already on original scale
+                    hyperbolic        = predict(mod, df),
+                    logistic_decay    = predict(mod, df)
     )
     
     ss_res <- sum((y - y_hat)^2)
@@ -1093,13 +1462,16 @@ predict_model <- function(mod, mname, x_seq) {
     x2    = x_seq^2
   )
   y_hat <- switch(mname,
-                  linear      = predict(mod, df_new),
-                  inverse     = predict(mod, df_new),
-                  poly2       = predict(mod, df_new),
-                  power       = exp(predict(mod, df_new)),
-                  exponential = exp(predict(mod, df_new)),
-                  log_linear  = predict(mod, df_new),
-                  gam         = as.numeric(predict(mod, df_new))
+                  linear            = predict(mod, df_new),
+                  inverse           = predict(mod, df_new),
+                  poly2             = predict(mod, df_new),
+                  power             = exp(predict(mod, df_new)),
+                  exponential       = exp(predict(mod, df_new)),
+                  log_linear        = predict(mod, df_new),
+                  gam               = as.numeric(predict(mod, df_new)),
+                  exp_decay_offset  = predict(mod, df_new),
+                  hyperbolic        = predict(mod, df_new),
+                  logistic_decay    = predict(mod, df_new)
   )
   data.frame(x = x_seq, y_hat = y_hat, model = mname)
 }
@@ -1107,22 +1479,28 @@ predict_model <- function(mod, mname, x_seq) {
 
 # ── model colours and labels ───────────────────────────────────────────
 model_colors <- c(
-  linear      = "#333333",
-  inverse     = "#E41A1C",
-  poly2       = "#377EB8",
-  power       = "#4DAF4A",
-  exponential = "#984EA3",
-  log_linear  = "#FF7F00",
-  gam         = "#A65628"
+  linear            = "#333333",
+  inverse           = "#E41A1C",
+  poly2             = "#377EB8",
+  power             = "#4DAF4A",
+  exponential       = "#984EA3",
+  log_linear        = "#FF7F00",
+  gam               = "#A65628",
+  exp_decay_offset  = "#F781BF",
+  hyperbolic        = "#999999",
+  logistic_decay    = "#66C2A5"
 )
 model_labels <- c(
-  linear      = "Linear: y = a + bx",
-  inverse     = "Inverse: y = a/x + b",
-  poly2       = "Poly2: y = a + bx + cx²",
-  power       = "Power: y = ax^b",
-  exponential = "Exponential: y = ae^(bx)",
-  log_linear  = "Log-linear: y = a + b·log(x)",
-  gam         = "GAM"
+  linear            = "Linear: y = a + bx",
+  inverse           = "Inverse: y = a/x + b",
+  poly2             = "Poly2: y = a + bx + cx²",
+  power             = "Power: y = ax^b",
+  exponential       = "Exponential: y = ae^(bx)",
+  log_linear        = "Log-linear: y = a + b·log(x)",
+  gam               = "GAM",
+  exp_decay_offset  = "Exp decay w/ floor: y = ae^(-bx) + c",
+  hyperbolic        = "Hyperbolic: y = a/(1+bx) + c",
+  logistic_decay    = "Logistic decay: y = a + (d-a)/(1+e^(b(x-c)))"
 )
 
 
@@ -1224,8 +1602,8 @@ all_metrics <- NULL
 
 for (yvar in insitu_vars) {
   
-  top6 <- screen[insitu_var == yvar][order(-abs_r_spearman)]$feature[1:6]
-  
+  top6 <- unique(c(screen[insitu_var == yvar][order(-abs_r_spearman)]$feature[1:6], "green","nir_swir2","red_blue","green_blue"))
+
   plots <- lapply(top6, function(feat) {
     tryCatch(
       compare_models(feat, yvar, bm),
@@ -1248,8 +1626,8 @@ for (yvar in insitu_vars) {
     if (is.null(plots[[i]])) next
     ggsave(
       filename = file.path(plotpath,
-                           paste0("model_compare_", yvar, "_",
-                                  top6[i], ".pdf")),
+                           paste0("matchups/model_compare_", yvar, "_",
+                                  top6[i], ".jpeg")),
       plot  = plots[[i]]$plot,
       width = 8,
       height = 7
@@ -1267,7 +1645,7 @@ for (yvar in insitu_vars) {
   
   ggsave(
     filename = file.path(plotpath,
-                         paste0("model_compare_", yvar, "_overview.pdf")),
+                         paste0("matchups/model_compare_", yvar, "_overview.pdf")),
     plot  = plot_grid,
     width = 18,
     height = 12
@@ -1289,3 +1667,224 @@ fwrite(all_metrics,
 fwrite(best_per_pair,
        file.path(datapath, "model_comparison_best.csv"))
 cat("Model comparison tables saved.\n")
+
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# ── SALINITY ~ GREEN : exp_decay_offset MODEL ONLY ────────────────────────
+# ────────────────────────────────────────────────────────────────────────────
+# y = a * exp(-b*x) + c
+# Produces a single annotated plot with the fitted curve and goodness-of-fit
+# metrics (R², RMSE, AIC, n) displayed directly on the panel.
+
+plot_exp_decay_fit <- function(feat, yvar, data,
+                               point_color = "gray40",
+                               line_color  = "#F781BF") {
+  
+  x <- data[[feat]]
+  y <- data[[yvar]]
+  
+  ok <- is.finite(x) & is.finite(y) & x > 0 & y > 0
+  x  <- x[ok]
+  y  <- y[ok]
+  df <- data.frame(x = x, y = y)
+  
+  rng_y <- diff(range(y))
+  
+  # ── fit ──────────────────────────────────────────────────────────────
+  mod <- nls(
+    y ~ a * exp(-b * x) + c,
+    data    = df,
+    start   = list(a = rng_y, b = 1 / mean(x), c = min(y)),
+    lower   = c(a = 0,   b = 0,   c = -abs(min(y))),
+    upper   = c(a = Inf, b = Inf, c = max(y)),
+    algorithm = "port",
+    control = nls.control(maxiter = 200, warnOnly = TRUE)
+  )
+  
+  co <- coef(mod)
+  
+  # ── goodness of fit ──────────────────────────────────────────────────
+  y_hat   <- predict(mod, df)
+  ss_res  <- sum((y - y_hat)^2)
+  ss_tot  <- sum((y - mean(y))^2)
+  r2      <- 1 - ss_res / ss_tot
+  rmse    <- sqrt(mean((y - y_hat)^2))
+  aic_val <- AIC(mod)
+  n       <- length(y)
+  
+  # ── prediction curve over a fine grid ───────────────────────────────
+  x_seq <- seq(min(x), max(x), length.out = 200)
+  y_seq <- predict(mod, data.frame(x = x_seq))
+  pred_df <- data.frame(x = x_seq, y_hat = y_seq)
+  
+  # ── label text for the panel ────────────────────────────────────────
+  eq_label <- sprintf(
+    "y = %.3f * e^(-%.3f*x) + %.3f\nR² = %.3f   RMSE = %.3f\nAIC = %.1f   n = %d",
+    co["a"], co["b"], co["c"], r2, rmse, aic_val, n
+  )
+  
+  # ── plot ─────────────────────────────────────────────────────────────
+  p <- ggplot(df, aes(x, y)) +
+    geom_point(alpha = 0.55, size = 1.8, color = point_color) +
+    geom_line(data = pred_df, aes(x, y_hat),
+              color = line_color, linewidth = 1.1) +
+    annotate(
+      "label",
+      x = max(x), y = max(y),
+      label = eq_label,
+      hjust = 1, vjust = 1,
+      size = 3.2,
+      label.size = 0.3,
+      fill = "white", alpha = 0.85
+    ) +
+    labs(
+      title = paste0(yvar, " = f(", feat, ")  —  exponential decay with floor"),
+      x = feat,
+      y = yvar
+    ) +
+    theme_bw(base_size = 11)
+  
+  list(plot = p, model = mod,
+       metrics = data.table(
+         model = "exp_decay_offset",
+         n = n, r2 = round(r2, 4),
+         RMSE = round(rmse, 4), AIC = round(aic_val, 2),
+         a = round(co["a"], 4), b = round(co["b"], 4), c = round(co["c"], 4)
+       ))
+}
+
+# ── run for Salinity ~ green ────────────────────────────────────────────
+result <- plot_exp_decay_fit("green", "Salinity", bm)
+
+print(result$plot)
+print(result$metrics)
+
+ggsave(
+  filename = file.path(plotpath, "matchups/salinity_green_exp_decay_offset.jpeg"),
+  plot = result$plot,
+  width = 7, height = 5.5
+)
+
+
+
+
+
+
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# ── LINEAR MODEL PLOTS : TSS ~ swir1_blue  AND  DOC ~ swir2_green ─────────
+# ────────────────────────────────────────────────────────────────────────────
+# y = a + b*x
+# Same style as the exp_decay_offset plot: scatter + fitted line +
+# goodness-of-fit metrics (R², RMSE, AIC, n) annotated on the panel.
+
+plot_linear_fit <- function(feat, yvar, data,
+                            point_color = "gray40",
+                            line_color  = "#333333",
+                            label_pos   = c("topright", "topleft",
+                                            "bottomright", "bottomleft")) {
+  
+  label_pos <- match.arg(label_pos)
+  
+  x <- data[[feat]]
+  y <- data[[yvar]]
+  
+  ok <- is.finite(x) & is.finite(y)
+  x  <- x[ok]
+  y  <- y[ok]
+  df <- data.frame(x = x, y = y)
+  
+  # ── fit ──────────────────────────────────────────────────────────────
+  mod <- lm(y ~ x, data = df)
+  co  <- coef(mod)
+  
+  # ── goodness of fit ──────────────────────────────────────────────────
+  y_hat   <- predict(mod, df)
+  ss_res  <- sum((y - y_hat)^2)
+  ss_tot  <- sum((y - mean(y))^2)
+  r2      <- 1 - ss_res / ss_tot
+  rmse    <- sqrt(mean((y - y_hat)^2))
+  aic_val <- AIC(mod)
+  n       <- length(y)
+  
+  # ── prediction line over a fine grid ────────────────────────────────
+  x_seq <- seq(min(x), max(x), length.out = 200)
+  y_seq <- predict(mod, data.frame(x = x_seq))
+  pred_df <- data.frame(x = x_seq, y_hat = y_seq)
+  
+  # ── label text for the panel ────────────────────────────────────────
+  eq_label <- sprintf(
+    "y = %.3f + %.3f*x\nR² = %.3f   RMSE = %.3f\nAIC = %.1f   n = %d",
+    co["(Intercept)"], co["x"], r2, rmse, aic_val, n
+  )
+  
+  # corner placement for the annotation box
+  pos <- switch(label_pos,
+                topright    = list(x = max(x), y = max(y), hjust = 1, vjust = 1),
+                topleft     = list(x = min(x), y = max(y), hjust = 0, vjust = 1),
+                bottomright = list(x = max(x), y = min(y), hjust = 1, vjust = 0),
+                bottomleft  = list(x = min(x), y = min(y), hjust = 0, vjust = 0)
+  )
+  
+  # ── plot ─────────────────────────────────────────────────────────────
+  p <- ggplot(df, aes(x, y)) +
+    geom_point(alpha = 0.55, size = 1.8, color = point_color) +
+    geom_line(data = pred_df, aes(x, y_hat),
+              color = line_color, linewidth = 1.1) +
+    annotate(
+      "label",
+      x = pos$x, y = pos$y,
+      label = eq_label,
+      hjust = pos$hjust, vjust = pos$vjust,
+      size = 3.2,
+      label.size = 0.3,
+      fill = "white", alpha = 0.85
+    ) +
+    labs(
+      title = paste0(yvar, " = f(", feat, ")  —  linear"),
+      x = feat,
+      y = yvar
+    ) +
+    theme_bw(base_size = 11)
+  
+  list(plot = p, model = mod,
+       metrics = data.table(
+         model = "linear",
+         n = n, r2 = round(r2, 4),
+         RMSE = round(rmse, 4), AIC = round(aic_val, 2),
+         intercept = round(co["(Intercept)"], 4),
+         slope = round(co["x"], 4)
+       ))
+}
+
+# ── run for TSS ~ swir1_blue ────────────────────────────────────────────
+result_tss <- plot_linear_fit("swir1_blue", "TSS", bm,
+                              label_pos = "topright")
+
+print(result_tss$plot)
+print(result_tss$metrics)
+
+ggsave(
+  filename = file.path(plotpath, "matchups/tss_swir1_blue_linear.jpeg"),
+  plot = result_tss$plot,
+  width = 7, height = 5.5
+)
+
+# ── run for DOC ~ swir2_green ───────────────────────────────────────────
+result_doc <- plot_linear_fit("swir2_green", "DOC", bm,
+                              label_pos = "topright")
+
+print(result_doc$plot)
+print(result_doc$metrics)
+
+ggsave(
+  filename = file.path(plotpath, "matchups/doc_swir2_green_linear.jpeg"),
+  plot = result_doc$plot,
+  width = 7, height = 5.5
+)
+
+
+
+
