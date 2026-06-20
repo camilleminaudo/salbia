@@ -519,19 +519,19 @@ p_annual <- ggplot(df_annual, aes(x = year, y = anom_annual)) +
 
 
 
-
+library(data.table)
 
 modeled_all <- fread("longitudinal_gam_profiles_allmetrics.csv")
 modeled_all[, date := as.Date(date)]
 
 modeled_all$decade <- as.factor(paste(floor(modeled_all$year/10)*10, "s",sep = ""))
-
+modeled_all$d_from_ocean <- 417 - modeled_all$d_from_basse
 
 # my metric
 mymetric = "green_zscore"
 myname =   "Green\nzscore"
 
-# ── 1. Filter to green_blue and aggregate onto a 2D grid ────────────────────
+# ── 1. Filter to green and aggregate onto a 2D grid ────────────────────
 
 df_grid <- modeled_all[
   metric == mymetric
@@ -591,7 +591,7 @@ p_heatmap <- ggplot(df_grid_all, aes(x = dist_ocean, y = month_grp)) +
   scale_x_continuous(
     breaks    = seq(50, 300, 50),
     expand    = c(0, 0),
-    transform = "reverse"
+    # transform = "reverse"
   ) +
   
   scale_y_continuous(
@@ -655,10 +655,24 @@ ggsave(
 
 
 
+# ── Plot monthly longitudinal patterns for a selection of metrics ───────────────────────────────────────────────────────────────
+
+
+library(parallel)
+library(pbapply)  # optional: adds a progress bar
+
+# metrics <- c("blue_zscore",
+#              "green_zscore",
+#              "red_zscore",
+#              "green_blue_zscore",
+#              "red_blue_zscore")
+
+metrics <- "green_zscore"
+
 
 plot_monthly_patterns <- function(modelled, metric) {
   
-  ggplot(modelled, aes(d_from_basse, pred)) +
+  ggplot(modelled, aes(d_from_ocean, pred)) +
     
     # Individual lines — muted, thin, in the background
     geom_line(
@@ -691,7 +705,7 @@ plot_monthly_patterns <- function(modelled, metric) {
     labs(
       title    = paste0("Modelled ", metric, " longitudinal profile"),
       subtitle = "Monthly patterns with LOESS trend",
-      x        = "Distance from Basse [km]",
+      x        = "Distance from ocean [km]",
       y        = metric,
       colour   = "Decade"
     ) +
@@ -720,10 +734,6 @@ modeled_all <- modeled_all |>
 modeled_split <- split(modeled_all, modeled_all$metric)
 
 
-library(parallel)
-library(pbapply)  # optional: adds a progress bar
-
-metrics <- unique(df_peaks$metric)
 
 pblapply(metrics, function(metric) {
   mymod <- modeled_split[[metric]]
